@@ -50,7 +50,10 @@ func (t *Tracker) GetCursor(dbPath string) (time.Time, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	pathHash := hashPath(dbPath)
+	pathHash, err := hashPath(dbPath)
+	if err != nil {
+		return time.Time{}, err
+	}
 	cursor, ok := t.state[pathHash]
 	if !ok {
 		return time.Time{}, nil
@@ -64,7 +67,10 @@ func (t *Tracker) SetCursor(dbPath string, cursor time.Time) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	pathHash := hashPath(dbPath)
+	pathHash, err := hashPath(dbPath)
+	if err != nil {
+		return err
+	}
 	t.state[pathHash] = cursor
 
 	return t.save()
@@ -123,8 +129,13 @@ func (t *Tracker) save() error {
 }
 
 // hashPath returns the hex-encoded SHA-256 hash of the cleaned, absolute path.
-func hashPath(path string) string {
-	cleaned := filepath.Clean(path)
-	hash := sha256.Sum256([]byte(cleaned))
-	return hex.EncodeToString(hash[:])
+// The path is normalized with filepath.Abs after filepath.Clean, matching the
+// identity package's normalization to ensure consistent hashing.
+func hashPath(path string) (string, error) {
+	absPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", fmt.Errorf("resolving absolute path: %w", err)
+	}
+	hash := sha256.Sum256([]byte(absPath))
+	return hex.EncodeToString(hash[:]), nil
 }
