@@ -22,6 +22,8 @@
 
 **Canonical Record** — The single authoritative shape for a usage record, derived from the OpenCode assistant `message.data` JSON. Defined in ADR-0002.
 
+**Client Hostname** — The machine hostname (`os.Hostname()`) attached to each usage record for operational visibility. Resolved once at collector startup. Distinguished from `client_id` which is a stable instance identifier used in the idempotency key tuple. Allows operators to identify which machine generated a record without relying on IP addresses.
+
 **Collector Token** — A pre-provisioned bearer token used by the collector to authenticate to the Gateway. SHA-256 hashed server-side. Provisioned via the Gateway's `/admin/clients/{id}/tokens` endpoint.
 
 **Idempotency Key** — The tuple `(client_id, source_database_id, source_record_id)` that uniquely identifies a usage record. The Gateway applies first-write-wins semantics to prevent duplicates.

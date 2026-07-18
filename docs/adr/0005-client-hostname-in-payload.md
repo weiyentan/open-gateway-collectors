@@ -1,0 +1,3 @@
+# ADR-0005: Include client hostname in ingestion payload
+
+Each usage record MUST include a `client_hostname` field containing the machine's hostname as resolved by `os.Hostname()`. This is separate from `client_id` — `client_id` is a stable instance identifier used in the idempotency key tuple, while `client_hostname` is a human-readable machine name for operational visibility (distinguishing which machine a record came from). The hostname is resolved once at collector startup and reused for all records in that run. Rationale: multiple collectors may share the same `client_id` configuration (e.g., deployed via the same config file), and operators need to trace records back to specific machines without cross-referencing IP addresses.
