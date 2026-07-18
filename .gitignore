@@ -1,0 +1,39 @@
+# Go binaries
+bin/
+*.exe
+*.test
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE files
+.idea/
+*.swp
+*.swo
+*~
+.vscode/
+.project
+.classpath
+.settings/
+
+# OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Collector state files
+.collector-*
+
+# Docker
+docker-compose.override.yml
+
+# Build artifacts
+tmp/
