@@ -119,7 +119,13 @@ func tableExists(db *sql.DB, name string) error {
 }
 
 // countRows returns the number of rows in the named table.
+// tableName MUST be one of the allowed table names to prevent SQL injection.
+// Only "message" and "session" are currently allowed.
 func countRows(db *sql.DB, tableName string) (int, error) {
+	allowed := map[string]bool{"message": true, "session": true}
+	if !allowed[tableName] {
+		return 0, fmt.Errorf("disallowed table name: %q", tableName)
+	}
 	var count int
 	err := db.QueryRow("SELECT count(*) FROM " + tableName).Scan(&count)
 	if err != nil {

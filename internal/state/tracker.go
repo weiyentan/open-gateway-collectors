@@ -87,14 +87,14 @@ func (t *Tracker) load() error {
 		return nil
 	}
 
-	// The state file is a JSON object mapping path-hash to RFC 3339 timestamp.
+	// The state file is a JSON object mapping path-hash to RFC 3339 Nano timestamp.
 	var raw map[string]string
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return fmt.Errorf("parsing state file: %w", err)
 	}
 
 	for hash, ts := range raw {
-		tm, err := time.Parse(time.RFC3339, ts)
+		tm, err := time.Parse(time.RFC3339Nano, ts)
 		if err != nil {
 			// Skip malformed entries rather than failing entirely.
 			continue
@@ -109,7 +109,7 @@ func (t *Tracker) load() error {
 func (t *Tracker) save() error {
 	raw := make(map[string]string, len(t.state))
 	for hash, ts := range t.state {
-		raw[hash] = ts.Format(time.RFC3339)
+		raw[hash] = ts.Format(time.RFC3339Nano)
 	}
 
 	data, err := json.MarshalIndent(raw, "", "  ")
