@@ -30,3 +30,10 @@ jobs:
 
       - name: Build (make)
         run: make build
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode-collector
+          path: bin/opencode-collector
+          if-no-files-found: error
