@@ -45,7 +45,7 @@ Each collector:
 
 ### Prerequisites
 
-- Go 1.22+
+- Go 1.25+
 - Make (optional, for using the Makefile)
 
 ### Build
@@ -99,7 +99,7 @@ make docker-build
 
 The Docker image uses a multi-stage build:
 
-1. **Builder stage:** `golang:1.22-alpine` — compiles the static binary
+1. **Builder stage:** `golang:1.25-alpine` — compiles the static binary
 2. **Runtime stage:** `gcr.io/distroless/static:nonroot` — minimal runtime image
 
 ## Makefile Targets
@@ -120,11 +120,18 @@ This project follows standard Go project layout conventions:
 
 ```
 .
-├── cmd/                  # Application entry points
+├── cmd/                        # Application entry points
 │   └── opencode-collector/
-│       └── main.go       # Main entry point
-├── internal/             # Private application packages
-│   └── config/           # Configuration module
+│       └── main.go             # Main entry point with signal handling
+├── internal/                   # Private application packages
+│   ├── collector/              # Main orchestration loop & signal handling
+│   ├── config/                 # Environment variable configuration
+│   ├── gateway/                # Gateway HTTP client with retry logic
+│   ├── heartbeat/              # Heartbeat (empty-batch) request builder
+│   ├── identity/               # Per-database UUID identity management
+│   ├── sqlite/                 # Database discovery, inspection & usage reader
+│   └── state/                  # Cursor state persistence (tracker)
+├── testdata/                   # SQLite test fixtures
 ├── go.mod
 ├── Makefile
 ├── Dockerfile
@@ -133,8 +140,17 @@ This project follows standard Go project layout conventions:
 
 ### Go Version
 
-This project requires Go 1.22 or later. The module path is `github.com/weiyentan/open-gateway-collectors`.
+This project requires Go 1.25 or later. The module path is `github.com/opencode-gateway/collectors`.
 
-### No External Dependencies
+### CLI Flags
 
-The foundation layer uses only the Go standard library. External dependencies will be introduced in subsequent iterations as needed.
+| Flag | Description |
+|------|-------------|
+| `-version` | Print the collector version (`dev` for development builds) and exit |
+
+### Dependencies
+
+- `modernc.org/sqlite` — CGO-free pure-Go SQLite driver (matches ADR-0001)
+- `github.com/google/uuid` — UUID generation for database identities
+
+No external runtime dependencies — the binary is a fully static build.
