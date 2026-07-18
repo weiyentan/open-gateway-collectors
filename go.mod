@@ -1,4 +1,4 @@
-module github.com/weiyentan/open-gateway-collectors
+module github.com/opencode-gateway/collectors
 
 go 1.25.0
 
