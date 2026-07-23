@@ -1,0 +1,7 @@
+issue_tracker: github
+labels:
+  afk: afk
+  hitl: hitl
+  todo: "status:todo"
+  in_progress: "status:in-progress"
+  done: "status:done"
