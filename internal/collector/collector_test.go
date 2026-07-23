@@ -550,7 +550,9 @@ func TestToGatewayUsageRecord_MapsCorrectly(t *testing.T) {
 	sqlRec := sqlite.UsageRecord{
 		SourceRecordID:       "rec-1",
 		SourceSessionID:      "sess-1",
+		ProviderID:           "openai",
 		ModelID:              "gpt-4",
+		Mode:                 "chat",
 		TokensInput:          100,
 		TokensOutput:         50,
 		TokensCacheRead:      10,
@@ -569,6 +571,12 @@ func TestToGatewayUsageRecord_MapsCorrectly(t *testing.T) {
 	}
 	if gwRec.Model != "gpt-4" {
 		t.Errorf("Model = %q, want %q", gwRec.Model, "gpt-4")
+	}
+	if gwRec.ProviderID != "openai" {
+		t.Errorf("ProviderID = %q, want %q", gwRec.ProviderID, "openai")
+	}
+	if gwRec.Mode != "chat" {
+		t.Errorf("Mode = %q, want %q", gwRec.Mode, "chat")
 	}
 	if gwRec.InputTokens != 100 {
 		t.Errorf("InputTokens = %d, want %d", gwRec.InputTokens, 100)

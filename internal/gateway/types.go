@@ -11,6 +11,8 @@ type UsageRecord struct {
 	SourceRecordID   string    `json:"source_record_id"`
 	SessionID        string    `json:"session_id"`
 	Model            string    `json:"model"`
+	ProviderID       string    `json:"providerId"`
+	Mode             string    `json:"mode"`
 	InputTokens      int64     `json:"input_tokens"`
 	OutputTokens     int64     `json:"output_tokens"`
 	TokensCacheRead  int64     `json:"tokens_cache_read"`
@@ -25,6 +27,8 @@ type IngestRecord struct {
 	SourceRecordID   string  `json:"source_record_id"`
 	SessionID        string  `json:"session_id"`
 	Model            string  `json:"model"`
+	Provider         string  `json:"provider"`
+	Mode             string  `json:"mode"`
 	InputTokens      int64   `json:"input_tokens"`
 	OutputTokens     int64   `json:"output_tokens"`
 	CachedTokens     int64   `json:"cached_tokens"`

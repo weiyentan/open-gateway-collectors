@@ -335,6 +335,8 @@ func toGatewayUsageRecord(rec sqlite.UsageRecord) gateway.UsageRecord {
 		SourceRecordID:   rec.SourceRecordID,
 		SessionID:        rec.SourceSessionID,
 		Model:            rec.ModelID,
+		ProviderID:       rec.ProviderID,
+		Mode:             rec.Mode,
 		InputTokens:      rec.TokensInput,
 		OutputTokens:     rec.TokensOutput,
 		TokensCacheRead:  rec.TokensCacheRead,

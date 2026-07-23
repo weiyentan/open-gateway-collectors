@@ -333,6 +333,8 @@ func TestMapToIngestRecord_WithCost(t *testing.T) {
 		SourceRecordID:   "rec-1",
 		SessionID:        "sess-1",
 		Model:            "gpt-4",
+		ProviderID:       "openai",
+		Mode:             "chat",
 		InputTokens:      100,
 		OutputTokens:     50,
 		TokensCacheRead:  10,
@@ -351,6 +353,12 @@ func TestMapToIngestRecord_WithCost(t *testing.T) {
 	}
 	if result.Model != "gpt-4" {
 		t.Errorf("Model = %q, want %q", result.Model, "gpt-4")
+	}
+	if result.Provider != "openai" {
+		t.Errorf("Provider = %q, want %q", result.Provider, "openai")
+	}
+	if result.Mode != "chat" {
+		t.Errorf("Mode = %q, want %q", result.Mode, "chat")
 	}
 	if result.InputTokens != 100 {
 		t.Errorf("InputTokens = %d, want %d", result.InputTokens, 100)

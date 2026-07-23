@@ -217,6 +217,8 @@ func MapToIngestRecord(record UsageRecord) IngestRecord {
 		SourceRecordID:   record.SourceRecordID,
 		SessionID:        record.SessionID,
 		Model:            record.Model,
+		Provider:         record.ProviderID,
+		Mode:             record.Mode,
 		InputTokens:      record.InputTokens,
 		OutputTokens:     record.OutputTokens,
 		CachedTokens:     cachedTokens,
