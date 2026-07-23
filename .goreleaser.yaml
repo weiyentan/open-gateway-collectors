@@ -34,6 +34,9 @@ archives:
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        format: zip
     files:
       - none*
 
@@ -42,6 +45,12 @@ checksum:
 
 snapshot:
   version_template: "{{ .Tag }}-next"
+
+release:
+  github:
+    owner: weiyentan
+    name: open-gateway-collectors
+  prerelease: auto
 
 changelog:
   sort: asc
