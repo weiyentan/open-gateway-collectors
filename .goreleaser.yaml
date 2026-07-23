@@ -1,0 +1,61 @@
+# .goreleaser.yaml
+# Build matrix: linux/amd64 (production), darwin/amd64, darwin/arm64, windows/amd64
+version: 2
+
+project_name: opencode-collector
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: opencode-collector
+    main: ./cmd/opencode-collector
+    binary: opencode-collector
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+      - goos: linux
+        goarch: arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - id: default
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - none*
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ .Tag }}-next"
+
+release:
+  github:
+    owner: weiyentan
+    name: open-gateway-collectors
+  prerelease: auto
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
