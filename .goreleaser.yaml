@@ -1,0 +1,55 @@
+# GoReleaser configuration for opencode-collector
+# Single linux/amd64 binary with version injection via ldflags.
+# Tag with a semver (e.g. v0.1.0) and goreleaser handles the rest.
+
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: opencode-collector
+    main: ./cmd/opencode-collector
+    binary: opencode-collector
+    goos:
+      - linux
+    goarch:
+      - amd64
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.Version={{.Version}}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^ci:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
+  groups:
+    - title: Features
+      regexp: '^feat(\(.*\))?:.*'
+      order: 0
+    - title: Fixes
+      regexp: '^fix(\(.*\))?:.*'
+      order: 1
+    - title: Others
+      order: 999
