@@ -97,7 +97,7 @@ Each push cycle (one `iterate()` call) runs every **Poll Interval** (default: 60
 
 7. **POST to Gateway** — The Ingest Batch is POSTed to `{GATEWAY_BASE_URL}/ingest` with the bearer **Collector Token** in the `Authorization` header. The Gateway applies first-write-wins deduplication using the Idempotency Key.
 
-8. **Retry Logic** — On connection errors or 5xx responses, the collector retries up to 3 times with exponential backoff (starting at 1 second, doubling to 30 seconds max, with ±25% jitter to avoid thundering herd). 4xx responses are NOT retried — they indicate a configuration or data problem. Context cancellation (shutdown signal) also stops retries immediately.
+8. **Retry Logic** — On connection errors or 5xx responses, the collector retries up to 3 times with exponential backoff (starting at 1 second, doubling to 30 seconds max, with ±25% jitter to avoid thundering herd). 4xx responses are NOT retried — they indicate a configuration or data problem.
 
 9. **Cursor Update** — Only after a successful 2xx response is the cursor advanced. The new cursor is set to the maximum `OccurredAt` timestamp among the sent records. This ensures that failed sends are retried on the next cycle — no records are skipped or lost.
 
