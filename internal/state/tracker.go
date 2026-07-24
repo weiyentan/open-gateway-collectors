@@ -4,14 +4,14 @@
 package state
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/opencode-gateway/collectors/internal/pathutil"
 )
 
 // Tracker manages cursor state across all known source databases. State is
@@ -50,7 +50,7 @@ func (t *Tracker) GetCursor(dbPath string) (time.Time, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	pathHash, err := hashPath(dbPath)
+	pathHash, err := pathutil.HashPath(dbPath)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -67,7 +67,7 @@ func (t *Tracker) SetCursor(dbPath string, cursor time.Time) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	pathHash, err := hashPath(dbPath)
+	pathHash, err := pathutil.HashPath(dbPath)
 	if err != nil {
 		return err
 	}
@@ -126,16 +126,4 @@ func (t *Tracker) save() error {
 	}
 
 	return nil
-}
-
-// hashPath returns the hex-encoded SHA-256 hash of the cleaned, absolute path.
-// The path is normalized with filepath.Abs after filepath.Clean, matching the
-// identity package's normalization to ensure consistent hashing.
-func hashPath(path string) (string, error) {
-	absPath, err := filepath.Abs(filepath.Clean(path))
-	if err != nil {
-		return "", fmt.Errorf("resolving absolute path: %w", err)
-	}
-	hash := sha256.Sum256([]byte(absPath))
-	return hex.EncodeToString(hash[:]), nil
 }

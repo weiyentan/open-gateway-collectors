@@ -64,12 +64,13 @@ func createTestDB(t *testing.T, dir, name string) string {
 // testConfig returns a minimal valid config for testing.
 func testConfig(baseURL string) *config.Config {
 	return &config.Config{
-		Token:             "test-token",
-		BaseURL:           baseURL,
-		PollInterval:      100 * time.Millisecond,
-		HeartbeatInterval: 200 * time.Millisecond,
-		LogLevel:          "debug",
-		CursorDir:         "",
+		Token:                  "test-token",
+		BaseURL:                baseURL,
+		PollInterval:           100 * time.Millisecond,
+		HeartbeatInterval:      200 * time.Millisecond,
+		LogLevel:               "debug",
+		CursorDir:              "",
+		ExcludeRecheckInterval: 3 * time.Hour,
 	}
 }
 

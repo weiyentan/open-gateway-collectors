@@ -174,13 +174,27 @@ func (c *Collector) resolveDatabases() ([]dbIdentity, error) {
 	var dbs []dbIdentity
 	for _, path := range paths {
 		// Gate check — fast path: skip excluded DBs whose recheck isn't due.
-		excluded, _ := c.exclusionGate.IsExcluded(path)
-		if excluded {
-			due, _ := c.exclusionGate.RecheckDue(path)
-			if !due {
-				continue // skip without opening the file
+		excluded := false
+		excludedBool, err := c.exclusionGate.IsExcluded(path)
+		if err != nil {
+			c.logger.Warn("exclusion check failed — proceeding with inspection",
+				"path", path,
+				"error", err,
+			)
+		} else {
+			excluded = excludedBool
+			if excluded {
+				due, err := c.exclusionGate.RecheckDue(path)
+				if err != nil {
+					c.logger.Warn("recheck check failed — proceeding with re-inspection",
+						"path", path,
+						"error", err,
+					)
+				} else if !due {
+					continue // skip without opening the file
+				}
+				// Recheck is due — fall through to OpenAndInspect.
 			}
-			// Recheck is due — fall through to OpenAndInspect.
 		}
 
 		dbInfo, err := sqlite.OpenAndInspect(path)
@@ -189,7 +203,12 @@ func (c *Collector) resolveDatabases() ([]dbIdentity, error) {
 				"path", path,
 				"error", err,
 			)
-			_ = c.exclusionGate.Exclude(path, err.Error())
+			if exclErr := c.exclusionGate.Exclude(path, err.Error()); exclErr != nil {
+				c.logger.Warn("failed to persist exclusion",
+					"path", path,
+					"error", exclErr,
+				)
+			}
 			continue
 		}
 
@@ -198,7 +217,12 @@ func (c *Collector) resolveDatabases() ([]dbIdentity, error) {
 			c.logger.Info("database re-admitted after passing recheck",
 				"path", path,
 			)
-			_ = c.exclusionGate.Remove(path)
+			if rmErr := c.exclusionGate.Remove(path); rmErr != nil {
+				c.logger.Warn("failed to remove exclusion after re-admission",
+					"path", path,
+					"error", rmErr,
+				)
+			}
 		}
 
 		id, err := c.identityStore.GetOrCreateIdentity(path)

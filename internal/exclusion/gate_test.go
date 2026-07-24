@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/opencode-gateway/collectors/internal/pathutil"
 )
 
 func TestGate_Exclude_WritesFile(t *testing.T) {
@@ -20,7 +22,7 @@ func TestGate_Exclude_WritesFile(t *testing.T) {
 	}
 
 	// Verify the exclusion file exists.
-	pathHash, err := hashPath(dbPath)
+	pathHash, err := pathutil.HashPath(dbPath)
 	if err != nil {
 		t.Fatalf("hashPath failed: %v", err)
 	}
@@ -192,7 +194,7 @@ func TestGate_CorruptEntry_DoesNotAffectOthers(t *testing.T) {
 	}
 
 	// Write a corrupt exclusion file for the corrupt path.
-	corruptHash, err := hashPath(corruptPath)
+	corruptHash, err := pathutil.HashPath(corruptPath)
 	if err != nil {
 		t.Fatalf("hashPath for corrupt path failed: %v", err)
 	}
@@ -250,7 +252,7 @@ func TestGate_RecheckDue_CorruptEntryReturnsTrue(t *testing.T) {
 	createFile(t, dbPath)
 
 	// Write a corrupt exclusion file.
-	pathHash, err := hashPath(dbPath)
+	pathHash, err := pathutil.HashPath(dbPath)
 	if err != nil {
 		t.Fatalf("hashPath failed: %v", err)
 	}
