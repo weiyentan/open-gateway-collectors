@@ -1,7 +1,7 @@
 {
-  "pushed_branch": "feat/add-darwin-and-windows-build-targets-to-goreleaser",
-  "original_branch": "feat/add-darwin-and-windows-build-targets-to-goreleaser",
-  "implemented_issues": [11],
-  "timestamp": "2026-07-24T09:19:58+12:00",
-  "is_awx_runner": true
+  "pushed_branch": "feat/create-a-new-issue-documentation-workflow-on-how-the-collectors-works",
+  "original_branch": "feat/create-a-new-issue-documentation-workflow-on-how-the-collectors-works",
+  "implemented_issues": [13],
+  "timestamp": "2026-07-23T23:39:58Z",
+  "is_awx_runner": false
 }
