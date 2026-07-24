@@ -64,12 +64,13 @@ func createTestDB(t *testing.T, dir, name string) string {
 // testConfig returns a minimal valid config for testing.
 func testConfig(baseURL string) *config.Config {
 	return &config.Config{
-		Token:             "test-token",
-		BaseURL:           baseURL,
-		PollInterval:      100 * time.Millisecond,
-		HeartbeatInterval: 200 * time.Millisecond,
-		LogLevel:          "debug",
-		CursorDir:         "",
+		Token:                  "test-token",
+		BaseURL:                baseURL,
+		PollInterval:           100 * time.Millisecond,
+		HeartbeatInterval:      200 * time.Millisecond,
+		LogLevel:               "debug",
+		CursorDir:              "",
+		ExcludeRecheckInterval: 3 * time.Hour,
 	}
 }
 
@@ -199,6 +200,143 @@ func TestCollector_ResolveDatabases_SkipsNonDB(t *testing.T) {
 	}
 	if len(dbs) != 1 {
 		t.Fatalf("expected 1 database (bad one skipped), got %d", len(dbs))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Exclusion gate
+// ---------------------------------------------------------------------------
+
+func TestCollector_ResolveDatabases_SkipsExcludedDB(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "valid")
+
+	cfg := config.Config{
+		Token:             "tok",
+		BaseURL:           "http://localhost",
+		SQLitePath:        dbPath,
+		LogLevel:          "debug",
+		CursorDir:         dir,
+		PollInterval:      60 * time.Second,
+		HeartbeatInterval: 120 * time.Second,
+		ExcludeRecheckInterval: 1 * time.Hour, // recheck not due during test
+	}
+
+	c, err := NewCollector(&cfg, "test")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	// Pre-exclude the valid database.
+	if err := c.exclusionGate.Exclude(dbPath, "test exclusion"); err != nil {
+		t.Fatalf("Exclude: %v", err)
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+	if len(dbs) != 0 {
+		t.Errorf("expected 0 databases (excluded and recheck not due), got %d", len(dbs))
+	}
+}
+
+func TestCollector_ResolveDatabases_RecheckDueDBReinspected(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "valid")
+
+	cfg := config.Config{
+		Token:             "tok",
+		BaseURL:           "http://localhost",
+		SQLitePath:        dbPath,
+		LogLevel:          "debug",
+		CursorDir:         dir,
+		PollInterval:      60 * time.Second,
+		HeartbeatInterval: 120 * time.Second,
+		ExcludeRecheckInterval: time.Nanosecond, // recheck due immediately
+	}
+
+	c, err := NewCollector(&cfg, "test")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	// Pre-exclude the valid database with a sub-nanosecond recheck interval.
+	if err := c.exclusionGate.Exclude(dbPath, "test exclusion"); err != nil {
+		t.Fatalf("Exclude: %v", err)
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+	if len(dbs) != 1 {
+		t.Fatalf("expected 1 database (re-admitted after recheck), got %d", len(dbs))
+	}
+	if dbs[0].path != dbPath {
+		t.Errorf("path = %q, want %q", dbs[0].path, dbPath)
+	}
+
+	// Verify the exclusion was removed after re-admission.
+	excluded, err := c.exclusionGate.IsExcluded(dbPath)
+	if err != nil {
+		t.Fatalf("IsExcluded: %v", err)
+	}
+	if excluded {
+		t.Error("expected exclusion to be removed after successful recheck")
+	}
+}
+
+func TestCollector_ResolveDatabases_ExcludesOnFirstFailure(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a file that is not a valid SQLite database.
+	badPath := filepath.Join(dir, "bad.db")
+	if err := os.WriteFile(badPath, []byte("not a database"), 0o644); err != nil {
+		t.Fatalf("write bad file: %v", err)
+	}
+
+	cfg := config.Config{
+		Token:             "tok",
+		BaseURL:           "http://localhost",
+		SQLiteDir:         dir,
+		LogLevel:          "debug",
+		CursorDir:         dir,
+		PollInterval:      60 * time.Second,
+		HeartbeatInterval: 120 * time.Second,
+		ExcludeRecheckInterval: 1 * time.Hour, // prevent immediate recheck
+	}
+
+	c, err := NewCollector(&cfg, "test")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	// First call: fails inspection and gets excluded.
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases (first call): %v", err)
+	}
+	if len(dbs) != 0 {
+		t.Errorf("expected 0 databases on first call, got %d", len(dbs))
+	}
+
+	// Verify the bad database is now excluded.
+	excluded, err := c.exclusionGate.IsExcluded(badPath)
+	if err != nil {
+		t.Fatalf("IsExcluded: %v", err)
+	}
+	if !excluded {
+		t.Error("expected bad database to be excluded after failed inspection")
+	}
+
+	// Second call: excluded database is skipped (recheck not due).
+	dbs, err = c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases (second call): %v", err)
+	}
+	if len(dbs) != 0 {
+		t.Errorf("expected 0 databases on second call (excluded, recheck not due), got %d", len(dbs))
 	}
 }
 

@@ -1,80 +1,78 @@
 package exclusion
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/opencode-gateway/collectors/internal/pathutil"
 )
 
-func TestGate_Exclude_ReturnsNoError(t *testing.T) {
-	baseDir := t.TempDir()
-	gate, err := NewGate(baseDir, 0)
-	if err != nil {
-		t.Fatalf("NewGate failed: %v", err)
-	}
+func TestGate_Exclude_WritesFile(t *testing.T) {
+	dir := t.TempDir()
+	gate := NewGate(dir, DefaultRecheckInterval)
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	createFile(t, dbPath)
 
-	err = gate.Exclude(dbPath, "required table 'message' not found")
-	if err != nil {
+	reason := "required table 'message' not found — not an OpenCode database"
+	if err := gate.Exclude(dbPath, reason); err != nil {
 		t.Fatalf("Exclude failed: %v", err)
 	}
 
-	// Verify the .exclude file was actually written.
-	exPath, err := gate.excludeFilePath(dbPath)
+	// Verify the exclusion file exists.
+	pathHash, err := pathutil.HashPath(dbPath)
 	if err != nil {
-		t.Fatalf("excludeFilePath failed: %v", err)
+		t.Fatalf("hashPath failed: %v", err)
 	}
-	if _, err := os.Stat(exPath); os.IsNotExist(err) {
-		t.Error(".exclude file was not created")
+	entryPath := filepath.Join(gate.gateDir, pathHash+".exclude")
+	if _, err := os.Stat(entryPath); os.IsNotExist(err) {
+		t.Errorf("exclusion file was not created at %s", entryPath)
 	}
 }
 
-func TestGate_IsExcluded_ReturnsTrueForExcludedPath(t *testing.T) {
-	baseDir := t.TempDir()
-	gate, err := NewGate(baseDir, 0)
-	if err != nil {
-		t.Fatalf("NewGate failed: %v", err)
-	}
+func TestGate_IsExcluded_ReturnsTrueForExcluded(t *testing.T) {
+	dir := t.TempDir()
+	gate := NewGate(dir, DefaultRecheckInterval)
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	createFile(t, dbPath)
 
-	if err := gate.Exclude(dbPath, "test exclusion"); err != nil {
+	if err := gate.Exclude(dbPath, "test reason"); err != nil {
 		t.Fatalf("Exclude failed: %v", err)
 	}
 
-	if !gate.IsExcluded(dbPath) {
-		t.Error("IsExcluded returned false for excluded path")
+	excluded, err := gate.IsExcluded(dbPath)
+	if err != nil {
+		t.Fatalf("IsExcluded failed: %v", err)
+	}
+	if !excluded {
+		t.Error("expected IsExcluded to return true for an excluded path")
 	}
 }
 
-func TestGate_IsExcluded_ReturnsFalseForUnknownPath(t *testing.T) {
-	baseDir := t.TempDir()
-	gate, err := NewGate(baseDir, 0)
-	if err != nil {
-		t.Fatalf("NewGate failed: %v", err)
-	}
+func TestGate_IsExcluded_ReturnsFalseForUnknown(t *testing.T) {
+	dir := t.TempDir()
+	gate := NewGate(dir, DefaultRecheckInterval)
 
-	if gate.IsExcluded("/nonexistent/path.db") {
-		t.Error("IsExcluded returned true for unknown path")
+	excluded, err := gate.IsExcluded("/nonexistent/path.db")
+	if err != nil {
+		t.Fatalf("IsExcluded failed: %v", err)
+	}
+	if excluded {
+		t.Error("expected IsExcluded to return false for an unknown path")
 	}
 }
 
 func TestGate_IsExcluded_ReturnsFalseAfterRemove(t *testing.T) {
-	baseDir := t.TempDir()
-	gate, err := NewGate(baseDir, 0)
-	if err != nil {
-		t.Fatalf("NewGate failed: %v", err)
-	}
+	dir := t.TempDir()
+	gate := NewGate(dir, DefaultRecheckInterval)
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	createFile(t, dbPath)
 
-	if err := gate.Exclude(dbPath, "test exclusion"); err != nil {
+	if err := gate.Exclude(dbPath, "test reason"); err != nil {
 		t.Fatalf("Exclude failed: %v", err)
 	}
 
@@ -82,138 +80,101 @@ func TestGate_IsExcluded_ReturnsFalseAfterRemove(t *testing.T) {
 		t.Fatalf("Remove failed: %v", err)
 	}
 
-	if gate.IsExcluded(dbPath) {
-		t.Error("IsExcluded returned true after Remove")
+	excluded, err := gate.IsExcluded(dbPath)
+	if err != nil {
+		t.Fatalf("IsExcluded after Remove failed: %v", err)
+	}
+	if excluded {
+		t.Error("expected IsExcluded to return false after Remove")
 	}
 }
 
-func TestGate_Remove_ReturnsNoErrorForAlreadyRemoved(t *testing.T) {
-	baseDir := t.TempDir()
-	gate, err := NewGate(baseDir, 0)
-	if err != nil {
-		t.Fatalf("NewGate failed: %v", err)
-	}
-
-	// Removing a never-excluded path should not error.
-	if err := gate.Remove("/nonexistent/path.db"); err != nil {
-		t.Errorf("Remove on non-excluded path returned error: %v", err)
-	}
-}
-
-func TestGate_RecheckDue_ReturnsTrueWhenPastNextRecheck(t *testing.T) {
-	baseDir := t.TempDir()
-	gate, err := NewGate(baseDir, 24*time.Hour)
-	if err != nil {
-		t.Fatalf("NewGate failed: %v", err)
-	}
+func TestGate_RecheckDue_ReturnsTrueWhenPastDue(t *testing.T) {
+	dir := t.TempDir()
+	// Use a 1-nanosecond interval so NextRecheck is immediately in the past.
+	gate := NewGate(dir, time.Nanosecond)
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	createFile(t, dbPath)
 
-	if err := gate.Exclude(dbPath, "test exclusion"); err != nil {
+	if err := gate.Exclude(dbPath, "test reason"); err != nil {
 		t.Fatalf("Exclude failed: %v", err)
 	}
 
-	// Manually overwrite the exclude file with a past next_recheck.
-	exPath, err := gate.excludeFilePath(dbPath)
+	due, err := gate.RecheckDue(dbPath)
 	if err != nil {
-		t.Fatalf("excludeFilePath failed: %v", err)
+		t.Fatalf("RecheckDue failed: %v", err)
 	}
-	rec := excludeRecord{
-		Path:        dbPath,
-		Reason:      "test exclusion",
-		ExcludedAt:  time.Now().Add(-48 * time.Hour),
-		NextRecheck: time.Now().Add(-1 * time.Hour),
-	}
-	data, err := json.MarshalIndent(rec, "", "  ")
-	if err != nil {
-		t.Fatalf("marshal failed: %v", err)
-	}
-	if err := os.WriteFile(exPath, data, 0o644); err != nil {
-		t.Fatalf("write failed: %v", err)
-	}
-
-	if !gate.RecheckDue(dbPath) {
-		t.Error("RecheckDue returned false when next_recheck is in the past")
+	if !due {
+		t.Error("expected RecheckDue to return true when past next_recheck")
 	}
 }
 
-func TestGate_RecheckDue_ReturnsFalseWhenNotYetDue(t *testing.T) {
-	baseDir := t.TempDir()
-	gate, err := NewGate(baseDir, 24*time.Hour)
-	if err != nil {
-		t.Fatalf("NewGate failed: %v", err)
-	}
+func TestGate_RecheckDue_ReturnsFalseWhenNotDue(t *testing.T) {
+	dir := t.TempDir()
+	// Default 3h interval means NextRecheck is well in the future.
+	gate := NewGate(dir, DefaultRecheckInterval)
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	createFile(t, dbPath)
 
-	if err := gate.Exclude(dbPath, "test exclusion"); err != nil {
+	if err := gate.Exclude(dbPath, "test reason"); err != nil {
 		t.Fatalf("Exclude failed: %v", err)
 	}
 
-	if gate.RecheckDue(dbPath) {
-		t.Error("RecheckDue returned true when next_recheck is 24h in the future")
+	due, err := gate.RecheckDue(dbPath)
+	if err != nil {
+		t.Fatalf("RecheckDue failed: %v", err)
+	}
+	if due {
+		t.Error("expected RecheckDue to return false when next_recheck is in the future")
 	}
 }
 
-func TestGate_RecheckDue_ReturnsTrueForUnknownPath(t *testing.T) {
-	baseDir := t.TempDir()
-	gate, err := NewGate(baseDir, 0)
-	if err != nil {
-		t.Fatalf("NewGate failed: %v", err)
-	}
+func TestGate_PersistsAcrossInstances(t *testing.T) {
+	dir := t.TempDir()
+	gate1 := NewGate(dir, DefaultRecheckInterval)
 
-	if !gate.RecheckDue("/nonexistent/path.db") {
-		t.Error("RecheckDue returned false for unknown path")
-	}
-}
-
-func TestGate_ExclusionsPersistAcrossInstances(t *testing.T) {
-	baseDir := t.TempDir()
-	gate1, err := NewGate(baseDir, 24*time.Hour)
-	if err != nil {
-		t.Fatalf("NewGate (1) failed: %v", err)
-	}
-
-	dbPath := filepath.Join(t.TempDir(), "persist.db")
+	dbPath := filepath.Join(t.TempDir(), "test.db")
 	createFile(t, dbPath)
 
-	if err := gate1.Exclude(dbPath, "persistent exclusion"); err != nil {
-		t.Fatalf("Exclude failed: %v", err)
+	if err := gate1.Exclude(dbPath, "persist test"); err != nil {
+		t.Fatalf("gate1 Exclude failed: %v", err)
 	}
 
 	// Create a new gate with the same base directory.
-	gate2, err := NewGate(baseDir, 24*time.Hour)
-	if err != nil {
-		t.Fatalf("NewGate (2) failed: %v", err)
-	}
+	gate2 := NewGate(dir, DefaultRecheckInterval)
 
-	if !gate2.IsExcluded(dbPath) {
-		t.Error("exclusion did not persist across Gate instances")
+	excluded, err := gate2.IsExcluded(dbPath)
+	if err != nil {
+		t.Fatalf("gate2 IsExcluded failed: %v", err)
+	}
+	if !excluded {
+		t.Error("expected exclusion to persist across Gate instances")
 	}
 }
 
 func TestGate_PathNormalization(t *testing.T) {
-	baseDir := t.TempDir()
-	gate, err := NewGate(baseDir, 0)
-	if err != nil {
-		t.Fatalf("NewGate failed: %v", err)
-	}
+	dir := t.TempDir()
+	gate := NewGate(dir, DefaultRecheckInterval)
 
-	workDir := t.TempDir()
-	dbPath := filepath.Join(workDir, "test.db")
+	// Use real filesystem paths to test normalization.
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
 	createFile(t, dbPath)
 
-	// Unclean path with ".." component that resolves to the same file.
-	unclean := filepath.Join(workDir, "sub", "..", "test.db")
+	unclean := filepath.Join(tmpDir, "sub", "..", "test.db")
 
-	if err := gate.Exclude(dbPath, "test normalization"); err != nil {
+	if err := gate.Exclude(dbPath, "normalization test"); err != nil {
 		t.Fatalf("Exclude with clean path failed: %v", err)
 	}
 
-	if !gate.IsExcluded(unclean) {
-		t.Error("unclean path did not resolve to same exclusion as clean path")
+	excluded, err := gate.IsExcluded(unclean)
+	if err != nil {
+		t.Fatalf("IsExcluded with unclean path failed: %v", err)
+	}
+	if !excluded {
+		t.Error("expected unclean path to resolve to the same exclusion as clean path")
 	}
 
 	// Also verify Remove works with unclean path.
@@ -221,62 +182,120 @@ func TestGate_PathNormalization(t *testing.T) {
 		t.Fatalf("Remove with unclean path failed: %v", err)
 	}
 
-	if gate.IsExcluded(dbPath) {
-		t.Error("Remove with unclean path did not remove clean path exclusion")
+	excluded, err = gate.IsExcluded(dbPath)
+	if err != nil {
+		t.Fatalf("IsExcluded after Remove failed: %v", err)
+	}
+	if excluded {
+		t.Error("expected Remove with unclean path to remove the exclusion")
 	}
 }
 
-func TestGate_CorruptExclusionFileDoesNotAffectOtherPaths(t *testing.T) {
-	baseDir := t.TempDir()
-	gate, err := NewGate(baseDir, 0)
+func TestGate_CorruptEntry_DoesNotAffectOthers(t *testing.T) {
+	dir := t.TempDir()
+	gate := NewGate(dir, DefaultRecheckInterval)
+
+	validPath := filepath.Join(t.TempDir(), "valid.db")
+	createFile(t, validPath)
+
+	corruptPath := filepath.Join(t.TempDir(), "corrupt.db")
+	createFile(t, corruptPath)
+
+	// Exclude the valid path.
+	if err := gate.Exclude(validPath, "valid db"); err != nil {
+		t.Fatalf("Exclude valid path failed: %v", err)
+	}
+
+	// Write a corrupt exclusion file for the corrupt path.
+	corruptHash, err := pathutil.HashPath(corruptPath)
 	if err != nil {
-		t.Fatalf("NewGate failed: %v", err)
+		t.Fatalf("hashPath for corrupt path failed: %v", err)
+	}
+	corruptEntryPath := filepath.Join(gate.gateDir, corruptHash+".exclude")
+	if err := os.WriteFile(corruptEntryPath, []byte("not valid json"), 0o644); err != nil {
+		t.Fatalf("writing corrupt exclusion file failed: %v", err)
 	}
 
-	goodPath := filepath.Join(t.TempDir(), "good.db")
-	badPath := filepath.Join(t.TempDir(), "bad.db")
-	createFile(t, goodPath)
-	createFile(t, badPath)
-
-	if err := gate.Exclude(goodPath, "good database"); err != nil {
-		t.Fatalf("Exclude goodPath failed: %v", err)
+	// The valid path should still be excluded.
+	excluded, err := gate.IsExcluded(validPath)
+	if err != nil {
+		t.Fatalf("IsExcluded valid path failed: %v", err)
+	}
+	if !excluded {
+		t.Error("expected valid path to still be excluded despite corrupt entry for other path")
 	}
 
-	// Manually write a corrupt .exclude file for the bad path.
-	badHash, err := hashPath(badPath)
+	// The corrupt path should not be considered excluded.
+	excluded, err = gate.IsExcluded(corruptPath)
+	if err != nil {
+		t.Fatalf("IsExcluded corrupt path failed: %v", err)
+	}
+	if excluded {
+		t.Error("expected corrupt entry to result in IsExcluded returning false")
+	}
+}
+
+func TestGate_Remove_NonExistentReturnsNoError(t *testing.T) {
+	dir := t.TempDir()
+	gate := NewGate(dir, DefaultRecheckInterval)
+
+	if err := gate.Remove("/nonexistent/path.db"); err != nil {
+		t.Errorf("Remove on non-existent path should not error, got: %v", err)
+	}
+}
+
+func TestGate_RecheckDue_ReturnsFalseForNonExcluded(t *testing.T) {
+	dir := t.TempDir()
+	gate := NewGate(dir, DefaultRecheckInterval)
+
+	due, err := gate.RecheckDue("/nonexistent/path.db")
+	if err != nil {
+		t.Fatalf("RecheckDue for non-excluded path failed: %v", err)
+	}
+	if due {
+		t.Error("expected RecheckDue to return false for a non-excluded path")
+	}
+}
+
+func TestGate_RecheckDue_CorruptEntryReturnsTrue(t *testing.T) {
+	dir := t.TempDir()
+	gate := NewGate(dir, DefaultRecheckInterval)
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	createFile(t, dbPath)
+
+	// Write a corrupt exclusion file.
+	pathHash, err := pathutil.HashPath(dbPath)
 	if err != nil {
 		t.Fatalf("hashPath failed: %v", err)
 	}
-	corruptPath := filepath.Join(gate.gateDir, badHash+".exclude")
-	if err := os.WriteFile(corruptPath, []byte("{invalid json"), 0o644); err != nil {
-		t.Fatalf("writing corrupt file failed: %v", err)
+	if err := os.MkdirAll(gate.gateDir, 0o755); err != nil {
+		t.Fatalf("mkdir gate dir failed: %v", err)
+	}
+	entryPath := filepath.Join(gate.gateDir, pathHash+".exclude")
+	if err := os.WriteFile(entryPath, []byte("not valid json"), 0o644); err != nil {
+		t.Fatalf("writing corrupt exclusion file failed: %v", err)
 	}
 
-	// The bad path should NOT be considered excluded (corrupt file).
-	if gate.IsExcluded(badPath) {
-		t.Error("IsExcluded returned true for path with corrupt exclusion file")
+	due, err := gate.RecheckDue(dbPath)
+	if err != nil {
+		t.Fatalf("RecheckDue for corrupt entry failed: %v", err)
 	}
-
-	// The good path should still be excluded.
-	if !gate.IsExcluded(goodPath) {
-		t.Error("corrupt file for one path affected another path's exclusion status")
+	if !due {
+		t.Error("expected RecheckDue to return true for a corrupt entry (treat as due)")
 	}
 }
 
 func TestGate_DefaultRecheckInterval(t *testing.T) {
-	baseDir := t.TempDir()
-	gate, err := NewGate(baseDir, 0)
-	if err != nil {
-		t.Fatalf("NewGate failed: %v", err)
-	}
+	dir := t.TempDir()
+	gate := NewGate(dir, 0)
 
 	if gate.recheckInterval != DefaultRecheckInterval {
 		t.Errorf("expected default interval %v, got %v", DefaultRecheckInterval, gate.recheckInterval)
 	}
 }
 
-// createFile creates an empty file at the given path. The file must not exist
-// in a directory that has already been removed (e.g. after t.TempDir cleanup).
+// createFile creates an empty file at the given path.
 func createFile(t *testing.T, path string) {
 	t.Helper()
 	f, err := os.Create(path)
