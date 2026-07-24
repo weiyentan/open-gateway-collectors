@@ -38,7 +38,7 @@ flowchart TD
     RETRY_BACKOFF --> RETRY_MAX{"Max Retries<br/>(3)?"}
     RETRY_MAX -->|no| POST
     RETRY_MAX -->|yes| FAIL_LOG["Log Error<br/>Cursor NOT Updated"]
-    RETRY_CHECK -->|yes (2xx)| UPDATE_CURSOR["SetCursor<br/>to Max OccurredAt<br/>Record Last Success"]
+    RETRY_CHECK -->|"yes: 2xx"| UPDATE_CURSOR["SetCursor<br/>to Max OccurredAt<br/>Record Last Success"]
     RETRY_CHECK -->|"no: 4xx"| FAIL_LOG
     FAIL_LOG --> NEXT_DB{More<br/>Databases?}
     UPDATE_CURSOR --> NEXT_DB
