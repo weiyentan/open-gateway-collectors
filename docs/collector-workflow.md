@@ -34,12 +34,12 @@ flowchart TD
     CONVERT --> POST["POST /ingest<br/>to Gateway"]
     
     POST --> RETRY_CHECK{"Success?"}
-    RETRY_CHECK -->|no (5xx or conn error)| RETRY_BACKOFF["Exponential Backoff<br/>1s → 2s → 4s → 30s<br/>±25% Jitter"]
+    RETRY_CHECK -->|"no: 5xx or conn error"| RETRY_BACKOFF["Exponential Backoff<br/>1s → 2s → 4s → 30s<br/>±25% Jitter"]
     RETRY_BACKOFF --> RETRY_MAX{"Max Retries<br/>(3)?"}
     RETRY_MAX -->|no| POST
     RETRY_MAX -->|yes| FAIL_LOG["Log Error<br/>Cursor NOT Updated"]
     RETRY_CHECK -->|yes (2xx)| UPDATE_CURSOR["SetCursor<br/>to Max OccurredAt<br/>Record Last Success"]
-    RETRY_CHECK -->|no (4xx)| FAIL_LOG
+    RETRY_CHECK -->|"no: 4xx"| FAIL_LOG
     FAIL_LOG --> NEXT_DB{More<br/>Databases?}
     UPDATE_CURSOR --> NEXT_DB
     
