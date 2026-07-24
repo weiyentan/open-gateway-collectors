@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/opencode-gateway/collectors/internal/pathutil"
@@ -30,21 +31,26 @@ type entry struct {
 // subdirectory under the cursor directory, keyed by sha256 of the cleaned
 // absolute path.
 type Gate struct {
+	mu              sync.Mutex
 	cursorDir       string
 	gateDir         string
 	recheckInterval time.Duration
 }
 
 // NewGate creates a new Gate. Exclusion files are stored under
-// cursorDir/.collector-gate/. If recheckInterval is zero, DefaultRecheckInterval
-// (3 hours) is used.
+// cursorDir/.collector-gate/. If recheckInterval is zero or negative,
+// DefaultRecheckInterval (3 hours) is used. The gate directory is created
+// if it does not exist.
 func NewGate(cursorDir string, recheckInterval time.Duration) *Gate {
 	if recheckInterval <= 0 {
 		recheckInterval = DefaultRecheckInterval
 	}
+	gateDir := filepath.Join(cursorDir, ".collector-gate")
+	// Best-effort creation of the gate directory.
+	_ = os.MkdirAll(gateDir, 0o755)
 	return &Gate{
 		cursorDir:       cursorDir,
-		gateDir:         filepath.Join(cursorDir, ".collector-gate"),
+		gateDir:         gateDir,
 		recheckInterval: recheckInterval,
 	}
 }
@@ -83,6 +89,9 @@ func (g *Gate) IsExcluded(path string) (bool, error) {
 // recorded for observability. The next_recheck is set to current time plus the
 // configured recheck interval.
 func (g *Gate) Exclude(path string, reason string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
 	absPath, err := filepath.Abs(filepath.Clean(path))
 	if err != nil {
 		return fmt.Errorf("resolving absolute path: %w", err)
@@ -97,7 +106,7 @@ func (g *Gate) Exclude(path string, reason string) error {
 		return fmt.Errorf("creating gate directory: %w", err)
 	}
 
-	now := time.Now().UTC()
+	now := time.Now()
 	e := entry{
 		Path:        absPath,
 		Reason:      reason,
@@ -141,12 +150,15 @@ func (g *Gate) RecheckDue(path string) (bool, error) {
 		return true, nil
 	}
 
-	return !time.Now().UTC().Before(e.NextRecheck), nil
+	return !time.Now().Before(e.NextRecheck), nil
 }
 
 // Remove deletes the exclusion file for the given database path. No error is
 // returned if the exclusion does not exist.
 func (g *Gate) Remove(path string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
 	pathHash, err := pathutil.HashPath(path)
 	if err != nil {
 		return err

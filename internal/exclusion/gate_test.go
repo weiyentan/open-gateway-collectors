@@ -176,6 +176,19 @@ func TestGate_PathNormalization(t *testing.T) {
 	if !excluded {
 		t.Error("expected unclean path to resolve to the same exclusion as clean path")
 	}
+
+	// Also verify Remove works with unclean path.
+	if err := gate.Remove(unclean); err != nil {
+		t.Fatalf("Remove with unclean path failed: %v", err)
+	}
+
+	excluded, err = gate.IsExcluded(dbPath)
+	if err != nil {
+		t.Fatalf("IsExcluded after Remove failed: %v", err)
+	}
+	if excluded {
+		t.Error("expected Remove with unclean path to remove the exclusion")
+	}
 }
 
 func TestGate_CorruptEntry_DoesNotAffectOthers(t *testing.T) {
@@ -270,6 +283,15 @@ func TestGate_RecheckDue_CorruptEntryReturnsTrue(t *testing.T) {
 	}
 	if !due {
 		t.Error("expected RecheckDue to return true for a corrupt entry (treat as due)")
+	}
+}
+
+func TestGate_DefaultRecheckInterval(t *testing.T) {
+	dir := t.TempDir()
+	gate := NewGate(dir, 0)
+
+	if gate.recheckInterval != DefaultRecheckInterval {
+		t.Errorf("expected default interval %v, got %v", DefaultRecheckInterval, gate.recheckInterval)
 	}
 }
 
