@@ -252,7 +252,7 @@ func (c *Collector) sendRecords(ctx context.Context, db dbIdentity, records []sq
 	}
 
 	req := &gateway.IngestRequest{
-		SchemaVersion:    "1.0",
+		SchemaVersion:    gateway.SchemaVersion,
 		CollectorVersion: c.version,
 		SourceDatabaseID: db.id,
 		Records:          ingestRecords,

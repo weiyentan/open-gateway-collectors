@@ -248,8 +248,8 @@ func TestCollector_SendsRecordsAndUpdatesCursor(t *testing.T) {
 	if !ok {
 		t.Fatal("no request received by gateway")
 	}
-	if req.SchemaVersion != "1.0" {
-		t.Errorf("SchemaVersion = %q, want %q", req.SchemaVersion, "1.0")
+	if req.SchemaVersion != gateway.SchemaVersion {
+		t.Errorf("SchemaVersion = %q, want %q", req.SchemaVersion, gateway.SchemaVersion)
 	}
 	if req.CollectorVersion != "0.1.0" {
 		t.Errorf("CollectorVersion = %q, want %q", req.CollectorVersion, "0.1.0")
@@ -407,8 +407,8 @@ func TestCollector_HeartbeatSentAfterInterval(t *testing.T) {
 	if len(req.Records) != 0 {
 		t.Errorf("expected 0 records in heartbeat, got %d", len(req.Records))
 	}
-	if req.SchemaVersion != "1.0" {
-		t.Errorf("SchemaVersion = %q, want %q", req.SchemaVersion, "1.0")
+	if req.SchemaVersion != gateway.SchemaVersion {
+		t.Errorf("SchemaVersion = %q, want %q", req.SchemaVersion, gateway.SchemaVersion)
 	}
 }
 

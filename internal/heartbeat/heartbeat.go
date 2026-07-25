@@ -10,7 +10,7 @@ import "github.com/opencode-gateway/collectors/internal/gateway"
 // inserted, only the source database's last_seen_at timestamp is updated.
 func BuildHeartbeat(sourceDatabaseID, collectorVersion, clientHostname string) *gateway.IngestRequest {
 	return &gateway.IngestRequest{
-		SchemaVersion:    "1.0",
+		SchemaVersion:    gateway.SchemaVersion,
 		CollectorVersion: collectorVersion,
 		ClientHostname:   clientHostname,
 		SourceDatabaseID: sourceDatabaseID,
