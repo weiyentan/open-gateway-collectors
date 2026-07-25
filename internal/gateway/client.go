@@ -17,6 +17,10 @@ import (
 )
 
 const (
+	// SchemaVersion is the current schema version sent in IngestRequest.
+	// The Gateway uses this to validate and parse the request payload.
+	SchemaVersion = "1.2"
+
 	// defaultMaxRetries is the default number of retry attempts after the
 	// initial request (total attempts = maxRetries + 1).
 	defaultMaxRetries = 3
@@ -200,10 +204,10 @@ func (c *Client) SendBatch(ctx context.Context, req *IngestRequest) (*IngestResp
 }
 
 // MapToIngestRecord converts an internal UsageRecord to the wire-format
-// IngestRecord. CachedTokens is the sum of TokensCacheRead and
-// TokensCacheWrite. EstimatedCostUSD is formatted as a decimal string, or
-// nil if the cost is zero. ReportedAt is an ISO 8601 string derived from
-// OccurredAt.
+// IngestRecord. CachedTokens is the sum of CacheReadTokens and
+// CacheWriteTokens for backward compatibility. EstimatedCostUSD is formatted
+// as a decimal string, or nil if the cost is zero. ReportedAt is an ISO 8601
+// string derived from OccurredAt.
 func MapToIngestRecord(record UsageRecord) IngestRecord {
 	cachedTokens := record.TokensCacheRead + record.TokensCacheWrite
 
@@ -219,6 +223,14 @@ func MapToIngestRecord(record UsageRecord) IngestRecord {
 		Model:            record.Model,
 		Provider:         record.ProviderID,
 		Mode:             record.Mode,
+		Agent:            record.Agent,
+		ProjectID:        record.ProjectID,
+		WorkspaceID:      record.WorkspaceID,
+		ParentSessionID:  record.ParentSessionID,
+		ReasoningTokens:  record.ReasoningTokens,
+		FinishReason:     record.FinishReason,
+		CacheReadTokens:  record.TokensCacheRead,
+		CacheWriteTokens: record.TokensCacheWrite,
 		InputTokens:      record.InputTokens,
 		OutputTokens:     record.OutputTokens,
 		CachedTokens:     cachedTokens,

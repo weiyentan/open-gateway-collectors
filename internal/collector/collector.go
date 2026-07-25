@@ -252,7 +252,7 @@ func (c *Collector) sendRecords(ctx context.Context, db dbIdentity, records []sq
 	}
 
 	req := &gateway.IngestRequest{
-		SchemaVersion:    "1.0",
+		SchemaVersion:    gateway.SchemaVersion,
 		CollectorVersion: c.version,
 		SourceDatabaseID: db.id,
 		Records:          ingestRecords,
@@ -337,6 +337,12 @@ func toGatewayUsageRecord(rec sqlite.UsageRecord) gateway.UsageRecord {
 		Model:            rec.ModelID,
 		ProviderID:       rec.ProviderID,
 		Mode:             rec.Mode,
+		Agent:            rec.Agent,
+		ProjectID:        rec.SourceProjectID,
+		WorkspaceID:      rec.WorkspaceID,
+		ParentSessionID:  rec.ParentSessionID,
+		ReasoningTokens:  rec.TokensReasoning,
+		FinishReason:     rec.FinishReason,
 		InputTokens:      rec.TokensInput,
 		OutputTokens:     rec.TokensOutput,
 		TokensCacheRead:  rec.TokensCacheRead,

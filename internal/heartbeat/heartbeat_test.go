@@ -2,13 +2,15 @@ package heartbeat
 
 import (
 	"testing"
+
+	"github.com/opencode-gateway/collectors/internal/gateway"
 )
 
 func TestBuildHeartbeat_AllFieldsSet(t *testing.T) {
 	req := BuildHeartbeat("db-123", "1.0.0", "my-host")
 
-	if req.SchemaVersion != "1.0" {
-		t.Errorf("SchemaVersion = %q, want %q", req.SchemaVersion, "1.0")
+	if req.SchemaVersion != gateway.SchemaVersion {
+		t.Errorf("SchemaVersion = %q, want %q", req.SchemaVersion, gateway.SchemaVersion)
 	}
 	if req.CollectorVersion != "1.0.0" {
 		t.Errorf("CollectorVersion = %q, want %q", req.CollectorVersion, "1.0.0")
