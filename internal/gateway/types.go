@@ -13,6 +13,12 @@ type UsageRecord struct {
 	Model            string    `json:"model"`
 	ProviderID       string    `json:"providerId"`
 	Mode             string    `json:"mode"`
+	Agent            string    `json:"agent"`
+	ProjectID        string    `json:"project_id"`
+	WorkspaceID      string    `json:"workspace_id"`
+	ParentSessionID  string    `json:"parent_session_id"`
+	ReasoningTokens  int64     `json:"reasoning_tokens"`
+	FinishReason     string    `json:"finish_reason"`
 	InputTokens      int64     `json:"input_tokens"`
 	OutputTokens     int64     `json:"output_tokens"`
 	TokensCacheRead  int64     `json:"tokens_cache_read"`
@@ -29,6 +35,14 @@ type IngestRecord struct {
 	Model            string  `json:"model"`
 	Provider         string  `json:"provider"`
 	Mode             string  `json:"mode"`
+	Agent            string  `json:"agent"`
+	ProjectID        string  `json:"project_id"`
+	WorkspaceID      string  `json:"workspace_id"`
+	ParentSessionID  string  `json:"parent_session_id"`
+	ReasoningTokens  int64   `json:"reasoning_tokens"`
+	FinishReason     string  `json:"finish_reason"`
+	CacheReadTokens  int64   `json:"cache_read_tokens"`
+	CacheWriteTokens int64   `json:"cache_write_tokens"`
 	InputTokens      int64   `json:"input_tokens"`
 	OutputTokens     int64   `json:"output_tokens"`
 	CachedTokens     int64   `json:"cached_tokens"`
