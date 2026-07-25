@@ -550,11 +550,17 @@ func TestToGatewayUsageRecord_MapsCorrectly(t *testing.T) {
 	sqlRec := sqlite.UsageRecord{
 		SourceRecordID:       "rec-1",
 		SourceSessionID:      "sess-1",
+		SourceProjectID:      "proj-42",
+		ParentSessionID:      "parent-sess-99",
+		WorkspaceID:          "ws-alpha",
+		Agent:                "vscode-agent",
 		ProviderID:           "openai",
 		ModelID:              "gpt-4",
 		Mode:                 "chat",
+		FinishReason:         "stop",
 		TokensInput:          100,
 		TokensOutput:         50,
+		TokensReasoning:      20,
 		TokensCacheRead:      10,
 		TokensCacheWrite:     5,
 		OpenCodeReportedCost: 0.003,
@@ -577,6 +583,24 @@ func TestToGatewayUsageRecord_MapsCorrectly(t *testing.T) {
 	}
 	if gwRec.Mode != "chat" {
 		t.Errorf("Mode = %q, want %q", gwRec.Mode, "chat")
+	}
+	if gwRec.Agent != "vscode-agent" {
+		t.Errorf("Agent = %q, want %q", gwRec.Agent, "vscode-agent")
+	}
+	if gwRec.ProjectID != "proj-42" {
+		t.Errorf("ProjectID = %q, want %q", gwRec.ProjectID, "proj-42")
+	}
+	if gwRec.WorkspaceID != "ws-alpha" {
+		t.Errorf("WorkspaceID = %q, want %q", gwRec.WorkspaceID, "ws-alpha")
+	}
+	if gwRec.ParentSessionID != "parent-sess-99" {
+		t.Errorf("ParentSessionID = %q, want %q", gwRec.ParentSessionID, "parent-sess-99")
+	}
+	if gwRec.ReasoningTokens != 20 {
+		t.Errorf("ReasoningTokens = %d, want %d", gwRec.ReasoningTokens, 20)
+	}
+	if gwRec.FinishReason != "stop" {
+		t.Errorf("FinishReason = %q, want %q", gwRec.FinishReason, "stop")
 	}
 	if gwRec.InputTokens != 100 {
 		t.Errorf("InputTokens = %d, want %d", gwRec.InputTokens, 100)
