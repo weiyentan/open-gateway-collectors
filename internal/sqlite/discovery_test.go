@@ -239,3 +239,165 @@ func TestOpenAndInspect_MissingTables(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Schema detection tests — optional tables and columns
+// ---------------------------------------------------------------------------
+
+// createDBWithOptionalTables creates a minimal OpenCode database with the
+// given optional tables prepopulated.
+func createDBWithOptionalTables(t *testing.T, hasProject, hasProjectDir, hasTodo bool) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("failed to open test db: %v", err)
+	}
+	defer db.Close()
+
+	// Required tables.
+	if _, err := db.Exec(`CREATE TABLE message (
+		id TEXT, session_id TEXT, data TEXT, time_created INTEGER, time_updated INTEGER
+	)`); err != nil {
+		t.Fatalf("failed to create message table: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE session (
+		id TEXT, time_created INTEGER, time_updated INTEGER,
+		project_id TEXT, parent_id TEXT, workspace_id TEXT, agent TEXT, model TEXT
+	)`); err != nil {
+		t.Fatalf("failed to create session table: %v", err)
+	}
+
+	// Optional tables.
+	if hasProject {
+		if _, err := db.Exec(`CREATE TABLE project (
+			id TEXT, title TEXT, worktree TEXT
+		)`); err != nil {
+			t.Fatalf("failed to create project table: %v", err)
+		}
+	}
+	if hasProjectDir {
+		if _, err := db.Exec(`CREATE TABLE project_directory (
+			project_id TEXT, path TEXT
+		)`); err != nil {
+			t.Fatalf("failed to create project_directory table: %v", err)
+		}
+	}
+	if hasTodo {
+		if _, err := db.Exec(`CREATE TABLE todo (
+			session_id TEXT, description TEXT, status TEXT
+		)`); err != nil {
+			t.Fatalf("failed to create todo table: %v", err)
+		}
+	}
+
+	return dbPath
+}
+
+func TestOpenAndInspect_DetectsOptionalTables_AllPresent(t *testing.T) {
+	dbPath := createDBWithOptionalTables(t, true, true, true)
+
+	info, err := OpenAndInspect(dbPath)
+	if err != nil {
+		t.Fatalf("OpenAndInspect failed: %v", err)
+	}
+
+	if !info.HasProjectTable {
+		t.Error("HasProjectTable should be true")
+	}
+	if !info.HasProjectDirectoryTable {
+		t.Error("HasProjectDirectoryTable should be true")
+	}
+	if !info.HasTodoTable {
+		t.Error("HasTodoTable should be true")
+	}
+
+	// Verify column detection.
+	if len(info.ProjectColumns) != 3 {
+		t.Errorf("expected 3 project columns, got %d: %v", len(info.ProjectColumns), info.ProjectColumns)
+	}
+	if len(info.SessionColumns) == 0 {
+		t.Error("SessionColumns should not be empty")
+	}
+}
+
+func TestOpenAndInspect_DetectsOptionalTables_NonePresent(t *testing.T) {
+	dbPath := createDBWithOptionalTables(t, false, false, false)
+
+	info, err := OpenAndInspect(dbPath)
+	if err != nil {
+		t.Fatalf("OpenAndInspect failed: %v", err)
+	}
+
+	if info.HasProjectTable {
+		t.Error("HasProjectTable should be false")
+	}
+	if info.HasProjectDirectoryTable {
+		t.Error("HasProjectDirectoryTable should be false")
+	}
+	if info.HasTodoTable {
+		t.Error("HasTodoTable should be false")
+	}
+	if len(info.ProjectColumns) != 0 {
+		t.Errorf("ProjectColumns should be empty, got %v", info.ProjectColumns)
+	}
+}
+
+func TestOpenAndInspect_DetectsOptionalTables_SomePresent(t *testing.T) {
+	// Only project table.
+	dbPath := createDBWithOptionalTables(t, true, false, false)
+
+	info, err := OpenAndInspect(dbPath)
+	if err != nil {
+		t.Fatalf("OpenAndInspect failed: %v", err)
+	}
+
+	if !info.HasProjectTable {
+		t.Error("HasProjectTable should be true")
+	}
+	if info.HasProjectDirectoryTable {
+		t.Error("HasProjectDirectoryTable should be false")
+	}
+	if info.HasTodoTable {
+		t.Error("HasTodoTable should be false")
+	}
+}
+
+func TestOpenAndInspect_DetectsSessionColumns(t *testing.T) {
+	dbPath := createDBWithOptionalTables(t, false, false, false)
+
+	info, err := OpenAndInspect(dbPath)
+	if err != nil {
+		t.Fatalf("OpenAndInspect failed: %v", err)
+	}
+
+	// Session is a required table — its columns should always be detected.
+	if len(info.SessionColumns) == 0 {
+		t.Error("SessionColumns should not be empty for valid OpenCode DB")
+	}
+
+	// Verify key columns exist.
+	expectedCols := []string{"id", "agent", "project_id", "parent_id", "workspace_id", "model"}
+	for _, col := range expectedCols {
+		found := false
+		for _, c := range info.SessionColumns {
+			if c == col {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("SessionColumns missing expected column %q, got %v", col, info.SessionColumns)
+		}
+	}
+
+	// Title column should NOT exist in the standard test schema.
+	for _, c := range info.SessionColumns {
+		if c == "title" {
+			t.Error("SessionColumns should not contain 'title' in standard test schema")
+		}
+	}
+}
+

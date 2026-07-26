@@ -77,6 +77,44 @@ type UsageRecord struct {
 	CostSource string
 }
 
+// ---------------------------------------------------------------------------
+// Projection types — read-only snapshots from optional OpenCode SQLite tables
+// ---------------------------------------------------------------------------
+
+// SessionContextData holds descriptive metadata read from an OpenCode session
+// row. It is read-only telemetry forwarded to the Gateway.
+type SessionContextData struct {
+	ExternalSessionID string // session.id
+	Title             string // session.title or empty string
+	Agent             string // session.agent
+	ProjectID         string // session.project_id (external project ID)
+	ParentSessionID   string // session.parent_id
+	WorkspaceID       string // session.workspace_id
+	Model             string // session.model
+}
+
+// ProjectData holds snapshot data from an OpenCode project row. Fields
+// correspond to columns in the project table.
+type ProjectData struct {
+	ExternalProjectID string // project.id
+	Title             string // project.title
+	Worktree          string // project.worktree (path to local checkout)
+}
+
+// ProjectDirectoryData holds a single directory mapping from the
+// project_directory table.
+type ProjectDirectoryData struct {
+	ExternalProjectID string // project_directory.project_id
+	Path              string // project_directory.path
+}
+
+// TodoData holds a single todo item snapshot from the todo table.
+type TodoData struct {
+	ExternalSessionID string // todo.session_id
+	Description       string // todo.description
+	Status            string // todo.status (e.g. "pending", "completed")
+}
+
 // DatabaseInfo holds metadata about a discovered OpenCode source database.
 type DatabaseInfo struct {
 	// Path is the absolute filesystem path to the database file.
@@ -97,4 +135,30 @@ type DatabaseInfo struct {
 	// SchemaVersion is a version identifier derived from the schema. Currently
 	// set to the SQLite user_version pragma value.
 	SchemaVersion string
+
+	// HasProjectTable indicates whether the project table exists in the
+	// source database. Optional — missing tables are handled gracefully.
+	HasProjectTable bool
+
+	// HasProjectDirectoryTable indicates whether the project_directory table
+	// exists. Optional — handled gracefully.
+	HasProjectDirectoryTable bool
+
+	// HasTodoTable indicates whether the todo table exists. Optional —
+	// handled gracefully.
+	HasTodoTable bool
+
+	// ProjectColumns lists the detected column names in the project table.
+	ProjectColumns []string
+
+	// ProjectDirectoryColumns lists the detected column names in the
+	// project_directory table.
+	ProjectDirectoryColumns []string
+
+	// TodoColumns lists the detected column names in the todo table.
+	TodoColumns []string
+
+	// SessionColumns lists the detected column names in the session table.
+	// Used for schema-aware projection reading (e.g. title column presence).
+	SessionColumns []string
 }

@@ -590,3 +590,424 @@ func TestReadRecords_InvalidDBPath(t *testing.T) {
 		t.Error("expected error for nonexistent database path, got nil")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Projection test helpers
+// ---------------------------------------------------------------------------
+
+// createTestDBWithProjections builds a test database with optional project,
+// project_directory, and todo tables in addition to the required message and
+// session tables. Returns the database path.
+func createTestDBWithProjections(t *testing.T, sessions []sessionRow, messages []messageRow, projects []projectRow, projectDirs []projectDirRow, todos []todoRow) string {
+	t.Helper()
+
+	dbPath := createTestDB(t, sessions, messages)
+
+	// Re-open to add optional tables.
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("failed to reopen test db: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS project (
+		id TEXT PRIMARY KEY,
+		title TEXT,
+		worktree TEXT
+	)`); err != nil {
+		t.Fatalf("failed to create project table: %v", err)
+	}
+
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS project_directory (
+		project_id TEXT,
+		path TEXT
+	)`); err != nil {
+		t.Fatalf("failed to create project_directory table: %v", err)
+	}
+
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS todo (
+		session_id TEXT,
+		description TEXT,
+		status TEXT
+	)`); err != nil {
+		t.Fatalf("failed to create todo table: %v", err)
+	}
+
+	// Insert project rows.
+	for _, p := range projects {
+		if _, err := db.Exec(`INSERT INTO project (id, title, worktree) VALUES (?, ?, ?)`,
+			p.id, p.title, p.worktree); err != nil {
+			t.Fatalf("failed to insert project %s: %v", p.id, err)
+		}
+	}
+
+	// Insert project_directory rows.
+	for _, pd := range projectDirs {
+		if _, err := db.Exec(`INSERT INTO project_directory (project_id, path) VALUES (?, ?)`,
+			pd.projectID, pd.path); err != nil {
+			t.Fatalf("failed to insert project_directory: %v", err)
+		}
+	}
+
+	// Insert todo rows.
+	for _, td := range todos {
+		if _, err := db.Exec(`INSERT INTO todo (session_id, description, status) VALUES (?, ?, ?)`,
+			td.sessionID, td.description, td.status); err != nil {
+			t.Fatalf("failed to insert todo: %v", err)
+		}
+	}
+
+	return dbPath
+}
+
+// openReaderWithSchema opens a reader and attaches schema info via
+// OpenAndInspect.
+func openReaderWithSchema(t *testing.T, dbPath string) *OpenCodeReader {
+	t.Helper()
+
+	info, err := OpenAndInspect(dbPath)
+	if err != nil {
+		t.Fatalf("OpenAndInspect failed: %v", err)
+	}
+
+	r, err := NewOpenCodeReader(dbPath)
+	if err != nil {
+		t.Fatalf("NewOpenCodeReader failed: %v", err)
+	}
+	r.WithSchemaInfo(info)
+	return r
+}
+
+type projectRow struct {
+	id, title, worktree string
+}
+
+type projectDirRow struct {
+	projectID, path string
+}
+
+type todoRow struct {
+	sessionID, description, status string
+}
+
+// ---------------------------------------------------------------------------
+// Projection read tests
+// ---------------------------------------------------------------------------
+
+func TestReadSessionContexts_HasFields(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", parentID: "parent-sess", workspaceID: "ws-1",
+			agent: "claude", model: "gpt-4o"},
+		{id: "sess-b", timeCreated: sessTimeB, timeUpdated: sessTimeB,
+			projectID: "proj-2", parentID: "", workspaceID: "ws-2",
+			agent: "code-editor", model: "claude-sonnet"},
+	}
+
+	dbPath := createTestDB(t, sessions, nil)
+	r := openReaderWithSchema(t, dbPath)
+	defer r.Close()
+
+	ctxs, err := r.ReadSessionContexts([]string{"sess-a", "sess-b"})
+	if err != nil {
+		t.Fatalf("ReadSessionContexts failed: %v", err)
+	}
+	if len(ctxs) != 2 {
+		t.Fatalf("expected 2 session contexts, got %d", len(ctxs))
+	}
+
+	// Verify sess-a fields.
+	if ctxs[0].ExternalSessionID != "sess-a" {
+		t.Errorf("ExternalSessionID = %q, want %q", ctxs[0].ExternalSessionID, "sess-a")
+	}
+	if ctxs[0].Agent != "claude" {
+		t.Errorf("Agent = %q, want %q", ctxs[0].Agent, "claude")
+	}
+	if ctxs[0].ProjectID != "proj-1" {
+		t.Errorf("ProjectID = %q, want %q", ctxs[0].ProjectID, "proj-1")
+	}
+	if ctxs[0].ParentSessionID != "parent-sess" {
+		t.Errorf("ParentSessionID = %q, want %q", ctxs[0].ParentSessionID, "parent-sess")
+	}
+	if ctxs[0].WorkspaceID != "ws-1" {
+		t.Errorf("WorkspaceID = %q, want %q", ctxs[0].WorkspaceID, "ws-1")
+	}
+	if ctxs[0].Model != "gpt-4o" {
+		t.Errorf("Model = %q, want %q", ctxs[0].Model, "gpt-4o")
+	}
+	// Title should be empty since the test schema doesn't include it.
+	if ctxs[0].Title != "" {
+		t.Errorf("Title should be empty, got %q", ctxs[0].Title)
+	}
+}
+
+func TestReadSessionContexts_EmptyIDs(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", agent: "claude", model: ""},
+	}
+
+	dbPath := createTestDB(t, sessions, nil)
+	r := openReaderWithSchema(t, dbPath)
+	defer r.Close()
+
+	// Empty input should return nil/empty without error.
+	ctxs, err := r.ReadSessionContexts(nil)
+	if err != nil {
+		t.Fatalf("ReadSessionContexts with nil input failed: %v", err)
+	}
+	if ctxs != nil {
+		t.Errorf("expected nil result for empty input, got %d items", len(ctxs))
+	}
+}
+
+func TestReadSessionContexts_UnknownID(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", agent: "claude", model: ""},
+	}
+
+	dbPath := createTestDB(t, sessions, nil)
+	r := openReaderWithSchema(t, dbPath)
+	defer r.Close()
+
+	ctxs, err := r.ReadSessionContexts([]string{"nonexistent"})
+	if err != nil {
+		t.Fatalf("ReadSessionContexts failed: %v", err)
+	}
+	if len(ctxs) != 0 {
+		t.Errorf("expected 0 contexts for unknown ID, got %d", len(ctxs))
+	}
+}
+
+func TestReadProjectData_ReadsExisting(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", agent: "claude", model: ""},
+	}
+	projects := []projectRow{
+		{id: "proj-1", title: "Test Project", worktree: "/tmp/test"},
+		{id: "proj-2", title: "Other Project", worktree: "/tmp/other"},
+	}
+
+	dbPath := createTestDBWithProjections(t, sessions, nil, projects, nil, nil)
+	r := openReaderWithSchema(t, dbPath)
+	defer r.Close()
+
+	data, err := r.ReadProjectData([]string{"proj-1", "proj-2"})
+	if err != nil {
+		t.Fatalf("ReadProjectData failed: %v", err)
+	}
+	if len(data) != 2 {
+		t.Fatalf("expected 2 projects, got %d", len(data))
+	}
+	if data[0].ExternalProjectID != "proj-1" {
+		t.Errorf("ExternalProjectID = %q, want %q", data[0].ExternalProjectID, "proj-1")
+	}
+	if data[0].Title != "Test Project" {
+		t.Errorf("Title = %q, want %q", data[0].Title, "Test Project")
+	}
+	if data[0].Worktree != "/tmp/test" {
+		t.Errorf("Worktree = %q, want %q", data[0].Worktree, "/tmp/test")
+	}
+}
+
+func TestReadProjectData_TableNotExist(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", agent: "claude", model: ""},
+	}
+
+	// Use DB without optional tables.
+	dbPath := createTestDB(t, sessions, nil)
+	r := openReaderWithSchema(t, dbPath)
+	defer r.Close()
+
+	data, err := r.ReadProjectData([]string{"proj-1"})
+	if err != nil {
+		t.Fatalf("ReadProjectData should not error when table doesn't exist: %v", err)
+	}
+	if len(data) != 0 {
+		t.Errorf("expected 0 projects when table doesn't exist, got %d", len(data))
+	}
+}
+
+func TestReadProjectDirectoryData_ReadsExisting(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", agent: "claude", model: ""},
+	}
+	projects := []projectRow{
+		{id: "proj-1", title: "Test Project", worktree: "/tmp/test"},
+	}
+	projectDirs := []projectDirRow{
+		{projectID: "proj-1", path: "/tmp/test/src"},
+		{projectID: "proj-1", path: "/tmp/test/lib"},
+	}
+
+	dbPath := createTestDBWithProjections(t, sessions, nil, projects, projectDirs, nil)
+	r := openReaderWithSchema(t, dbPath)
+	defer r.Close()
+
+	data, err := r.ReadProjectDirectoryData([]string{"proj-1"})
+	if err != nil {
+		t.Fatalf("ReadProjectDirectoryData failed: %v", err)
+	}
+	if len(data) != 2 {
+		t.Fatalf("expected 2 project directory entries, got %d", len(data))
+	}
+	if data[0].ExternalProjectID != "proj-1" {
+		t.Errorf("ExternalProjectID = %q, want %q", data[0].ExternalProjectID, "proj-1")
+	}
+}
+
+func TestReadProjectDirectoryData_TableNotExist(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", agent: "claude", model: ""},
+	}
+
+	dbPath := createTestDB(t, sessions, nil)
+	r := openReaderWithSchema(t, dbPath)
+	defer r.Close()
+
+	data, err := r.ReadProjectDirectoryData([]string{"proj-1"})
+	if err != nil {
+		t.Fatalf("ReadProjectDirectoryData should not error when table doesn't exist: %v", err)
+	}
+	if len(data) != 0 {
+		t.Errorf("expected 0 entries when table doesn't exist, got %d", len(data))
+	}
+}
+
+func TestReadTodoData_ReadsExisting(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", agent: "claude", model: ""},
+		{id: "sess-b", timeCreated: sessTimeB, timeUpdated: sessTimeB,
+			projectID: "proj-1", agent: "gpt", model: ""},
+	}
+	todos := []todoRow{
+		{sessionID: "sess-a", description: "Write tests", status: "completed"},
+		{sessionID: "sess-a", description: "Review PR", status: "pending"},
+		{sessionID: "sess-b", description: "Deploy", status: "pending"},
+	}
+
+	dbPath := createTestDBWithProjections(t, sessions, nil, nil, nil, todos)
+	r := openReaderWithSchema(t, dbPath)
+	defer r.Close()
+
+	data, err := r.ReadTodoData([]string{"sess-a", "sess-b"})
+	if err != nil {
+		t.Fatalf("ReadTodoData failed: %v", err)
+	}
+	if len(data) != 3 {
+		t.Fatalf("expected 3 todo items, got %d", len(data))
+	}
+
+	// Count by session.
+	sessACount := 0
+	sessBCount := 0
+	for _, td := range data {
+		if td.ExternalSessionID == "sess-a" {
+			sessACount++
+		} else if td.ExternalSessionID == "sess-b" {
+			sessBCount++
+		}
+	}
+	if sessACount != 2 {
+		t.Errorf("expected 2 todos for sess-a, got %d", sessACount)
+	}
+	if sessBCount != 1 {
+		t.Errorf("expected 1 todo for sess-b, got %d", sessBCount)
+	}
+}
+
+func TestReadTodoData_TableNotExist(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", agent: "claude", model: ""},
+	}
+
+	dbPath := createTestDB(t, sessions, nil)
+	r := openReaderWithSchema(t, dbPath)
+	defer r.Close()
+
+	data, err := r.ReadTodoData([]string{"sess-a"})
+	if err != nil {
+		t.Fatalf("ReadTodoData should not error when table doesn't exist: %v", err)
+	}
+	if len(data) != 0 {
+		t.Errorf("expected 0 todos when table doesn't exist, got %d", len(data))
+	}
+}
+
+func TestSchemaInfo_ReflectsDetectedTables(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", agent: "claude", model: ""},
+	}
+	projects := []projectRow{
+		{id: "proj-1", title: "Test", worktree: "/tmp"},
+	}
+	todos := []todoRow{
+		{sessionID: "sess-a", description: "Task", status: "pending"},
+	}
+
+	// DB with project and todo, no project_directory.
+	dbPath := createTestDBWithProjections(t, sessions, nil, projects, nil, todos)
+	r := openReaderWithSchema(t, dbPath)
+	defer r.Close()
+
+	info := r.SchemaInfo()
+
+	if !info.HasProjectTable {
+		t.Error("HasProjectTable should be true")
+	}
+	// project_directory table is created by the helper even when no rows
+	// are inserted — verify it is detected.
+	if !info.HasProjectDirectoryTable {
+		t.Error("HasProjectDirectoryTable should be true")
+	}
+	if !info.HasTodoTable {
+		t.Error("HasTodoTable should be true")
+	}
+	if !containsStr(info.ProjectColumns, "title") {
+		t.Error("ProjectColumns should contain 'title'")
+	}
+	if !containsStr(info.TodoColumns, "status") {
+		t.Error("TodoColumns should contain 'status'")
+	}
+}
+
+func TestSchemaInfo_NoOptionalTables(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", agent: "claude", model: ""},
+	}
+
+	dbPath := createTestDB(t, sessions, nil)
+	r := openReaderWithSchema(t, dbPath)
+	defer r.Close()
+
+	info := r.SchemaInfo()
+
+	if info.HasProjectTable {
+		t.Error("HasProjectTable should be false")
+	}
+	if info.HasProjectDirectoryTable {
+		t.Error("HasProjectDirectoryTable should be false")
+	}
+	if info.HasTodoTable {
+		t.Error("HasTodoTable should be false")
+	}
+}
+
+func containsStr(slice []string, s string) bool {
+	for _, v := range slice {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}

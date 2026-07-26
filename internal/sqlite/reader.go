@@ -4,27 +4,53 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
 
-// Reader defines the interface for reading usage records from an OpenCode
-// source database. Implementations must be safe for concurrent use if the
-// underlying database driver supports it.
+// Reader defines the interface for reading usage records and projection
+// snapshots from an OpenCode source database. Implementations must be safe
+// for concurrent use if the underlying database driver supports it.
 type Reader interface {
 	// ReadRecords returns usage records with message.time_updated strictly
 	// greater than since, ordered by time_updated ascending, up to limit
 	// records. User messages without tokens.input in message.data are skipped.
 	ReadRecords(since time.Time, limit int) ([]UsageRecord, error)
+
+	// ReadSessionContexts returns session context data for the given session
+	// IDs. If the session table lacks expected columns, those fields are
+	// left at their zero values. Returns an empty slice (not error) for
+	// unknown or empty IDs.
+	ReadSessionContexts(sessionIDs []string) ([]SessionContextData, error)
+
+	// ReadProjectData returns project data for the given project IDs from
+	// the project table. If the table does not exist, returns an empty slice
+	// without error.
+	ReadProjectData(projectIDs []string) ([]ProjectData, error)
+
+	// ReadProjectDirectoryData returns project directory mappings for the
+	// given project IDs. If the table does not exist, returns an empty
+	// slice without error.
+	ReadProjectDirectoryData(projectIDs []string) ([]ProjectDirectoryData, error)
+
+	// ReadTodoData returns todo items for the given session IDs. If the
+	// todo table does not exist, returns an empty slice without error.
+	ReadTodoData(sessionIDs []string) ([]TodoData, error)
+
+	// SchemaInfo returns the DatabaseInfo populated during inspection.
+	SchemaInfo() DatabaseInfo
 }
 
 // OpenCodeReader reads usage records from an OpenCode SQLite source database.
 // It uses a read-only connection with a prepared statement for efficient
 // cursor-based incremental reads.
 type OpenCodeReader struct {
-	db   *sql.DB
-	stmt *sql.Stmt
+	db     *sql.DB
+	stmt   *sql.Stmt
+	dbInfo *DatabaseInfo
 }
 
 // NewOpenCodeReader opens an OpenCode SQLite database in read-only mode,
@@ -61,7 +87,24 @@ func NewOpenCodeReader(dbPath string) (*OpenCodeReader, error) {
 	return &OpenCodeReader{db: db, stmt: stmt}, nil
 }
 
-// ReadRecords implements Reader.ReadRecords.
+// WithSchemaInfo attaches the DatabaseInfo from OpenAndInspect so the reader
+// can be schema-aware when reading projection tables. Must be called before
+// any projection read methods.
+func (r *OpenCodeReader) WithSchemaInfo(info *DatabaseInfo) *OpenCodeReader {
+	if info != nil {
+		r.dbInfo = info
+	}
+	return r
+}
+
+// SchemaInfo returns the DatabaseInfo populated during inspection, or an
+// empty zero-value if WithSchemaInfo was never called.
+func (r *OpenCodeReader) SchemaInfo() DatabaseInfo {
+	if r.dbInfo == nil {
+		return DatabaseInfo{}
+	}
+	return *r.dbInfo
+}
 func (r *OpenCodeReader) ReadRecords(since time.Time, limit int) ([]UsageRecord, error) {
 	sinceMs := since.UnixMilli()
 
@@ -111,6 +154,249 @@ func (r *OpenCodeReader) Close() error {
 		_ = r.stmt.Close()
 	}
 	return r.db.Close()
+}
+
+// ---------------------------------------------------------------------------
+// Projection reads — read-only snapshots from optional OpenCode tables
+// ---------------------------------------------------------------------------
+
+// ReadSessionContexts implements Reader.ReadSessionContexts.
+func (r *OpenCodeReader) ReadSessionContexts(sessionIDs []string) ([]SessionContextData, error) {
+	if len(sessionIDs) == 0 {
+		return nil, nil
+	}
+
+	// Determine which columns exist in the session table.
+	hasTitle := false
+	if r.dbInfo != nil {
+		for _, col := range r.dbInfo.SessionColumns {
+			if col == "title" {
+				hasTitle = true
+				break
+			}
+		}
+	}
+
+	// Build query dynamically based on available columns.
+	titleCol := "'' as title"
+	if hasTitle {
+		titleCol = "s.title"
+	}
+
+	// Build parameterized IN clause.
+	placeholders := make([]string, len(sessionIDs))
+	args := make([]any, len(sessionIDs))
+	for i, id := range sessionIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	query := fmt.Sprintf(`
+		SELECT s.id, %s, s.agent, s.project_id, s.parent_id, s.workspace_id, s.model
+		FROM session s
+		WHERE s.id IN (%s)`, titleCol, strings.Join(placeholders, ","))
+
+	rows, err := r.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying session contexts: %w", err)
+	}
+	defer rows.Close()
+
+	var result []SessionContextData
+	for rows.Next() {
+		var (
+			id, title, agent, projectID, parentID, workspaceID, model sql.NullString
+		)
+		if err := rows.Scan(&id, &title, &agent, &projectID, &parentID, &workspaceID, &model); err != nil {
+			return nil, fmt.Errorf("scanning session context: %w", err)
+		}
+		result = append(result, SessionContextData{
+			ExternalSessionID: id.String,
+			Title:             title.String,
+			Agent:             agent.String,
+			ProjectID:         projectID.String,
+			ParentSessionID:   parentID.String,
+			WorkspaceID:       workspaceID.String,
+			Model:             model.String,
+		})
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating session contexts: %w", err)
+	}
+	return result, nil
+}
+
+// ReadProjectData implements Reader.ReadProjectData.
+func (r *OpenCodeReader) ReadProjectData(projectIDs []string) ([]ProjectData, error) {
+	if len(projectIDs) == 0 {
+		return nil, nil
+	}
+
+	if r.dbInfo == nil || !r.dbInfo.HasProjectTable {
+		return nil, nil
+	}
+
+	// Determine available columns.
+	hasTitle := slices.Contains(r.dbInfo.ProjectColumns, "title")
+	hasWorktree := slices.Contains(r.dbInfo.ProjectColumns, "worktree")
+
+	// Build SELECT expressions.
+	selectCols := []string{"p.id"}
+	if hasTitle {
+		selectCols = append(selectCols, "p.title")
+	} else {
+		selectCols = append(selectCols, "'' as title")
+	}
+	if hasWorktree {
+		selectCols = append(selectCols, "p.worktree")
+	} else {
+		selectCols = append(selectCols, "'' as worktree")
+	}
+
+	placeholders := make([]string, len(projectIDs))
+	args := make([]any, len(projectIDs))
+	for i, id := range projectIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	query := fmt.Sprintf("SELECT %s FROM project p WHERE p.id IN (%s)",
+		strings.Join(selectCols, ", "), strings.Join(placeholders, ","))
+
+	rows, err := r.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying project data: %w", err)
+	}
+	defer rows.Close()
+
+	var result []ProjectData
+	for rows.Next() {
+		var id, title, worktree sql.NullString
+		if err := rows.Scan(&id, &title, &worktree); err != nil {
+			return nil, fmt.Errorf("scanning project data: %w", err)
+		}
+		result = append(result, ProjectData{
+			ExternalProjectID: id.String,
+			Title:             title.String,
+			Worktree:          worktree.String,
+		})
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating project data: %w", err)
+	}
+	return result, nil
+}
+
+// ReadProjectDirectoryData implements Reader.ReadProjectDirectoryData.
+func (r *OpenCodeReader) ReadProjectDirectoryData(projectIDs []string) ([]ProjectDirectoryData, error) {
+	if len(projectIDs) == 0 {
+		return nil, nil
+	}
+
+	if r.dbInfo == nil || !r.dbInfo.HasProjectDirectoryTable {
+		return nil, nil
+	}
+
+	// Determine available columns.
+	hasPath := slices.Contains(r.dbInfo.ProjectDirectoryColumns, "path")
+
+	pathCol := "'' as path"
+	if hasPath {
+		pathCol = "pd.path"
+	}
+
+	placeholders := make([]string, len(projectIDs))
+	args := make([]any, len(projectIDs))
+	for i, id := range projectIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	query := fmt.Sprintf("SELECT pd.project_id, %s FROM project_directory pd WHERE pd.project_id IN (%s)",
+		pathCol, strings.Join(placeholders, ","))
+
+	rows, err := r.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying project directory data: %w", err)
+	}
+	defer rows.Close()
+
+	var result []ProjectDirectoryData
+	for rows.Next() {
+		var projectID, path sql.NullString
+		if err := rows.Scan(&projectID, &path); err != nil {
+			return nil, fmt.Errorf("scanning project directory data: %w", err)
+		}
+		result = append(result, ProjectDirectoryData{
+			ExternalProjectID: projectID.String,
+			Path:              path.String,
+		})
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating project directory data: %w", err)
+	}
+	return result, nil
+}
+
+// ReadTodoData implements Reader.ReadTodoData.
+func (r *OpenCodeReader) ReadTodoData(sessionIDs []string) ([]TodoData, error) {
+	if len(sessionIDs) == 0 {
+		return nil, nil
+	}
+
+	if r.dbInfo == nil || !r.dbInfo.HasTodoTable {
+		return nil, nil
+	}
+
+	// Determine available columns.
+	hasDescription := slices.Contains(r.dbInfo.TodoColumns, "description")
+	hasStatus := slices.Contains(r.dbInfo.TodoColumns, "status")
+
+	descCol := "'' as description"
+	if hasDescription {
+		descCol = "t.description"
+	}
+	statusCol := "'' as status"
+	if hasStatus {
+		statusCol = "t.status"
+	}
+
+	placeholders := make([]string, len(sessionIDs))
+	args := make([]any, len(sessionIDs))
+	for i, id := range sessionIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	query := fmt.Sprintf("SELECT t.session_id, %s, %s FROM todo t WHERE t.session_id IN (%s)",
+		descCol, statusCol, strings.Join(placeholders, ","))
+
+	rows, err := r.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying todo data: %w", err)
+	}
+	defer rows.Close()
+
+	var result []TodoData
+	for rows.Next() {
+		var sessionID, description, status sql.NullString
+		if err := rows.Scan(&sessionID, &description, &status); err != nil {
+			return nil, fmt.Errorf("scanning todo data: %w", err)
+		}
+		result = append(result, TodoData{
+			ExternalSessionID: sessionID.String,
+			Description:       description.String,
+			Status:            status.String,
+		})
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating todo data: %w", err)
+	}
+	return result, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -2,7 +2,11 @@
 // OpenCode Gateway's ingestion endpoint.
 package gateway
 
-import "time"
+import (
+	"time"
+
+	"github.com/opencode-gateway/collectors/internal/sqlite"
+)
 
 // UsageRecord is a single normalized usage record derived from one assistant
 // message.data usage JSON blob. This is the internal representation before
@@ -50,13 +54,58 @@ type IngestRecord struct {
 	ReportedAt       string  `json:"reported_at"`
 }
 
+// ---------------------------------------------------------------------------
+// Batch-level projection snapshot types (wire format)
+// ---------------------------------------------------------------------------
+
+// SessionContext is a batch-level snapshot of OpenCode session metadata
+// included alongside usage records in the ingest payload. One per distinct
+// external session ID in the batch.
+type SessionContext struct {
+	ExternalSessionID string `json:"external_session_id"`
+	Title             string `json:"title,omitempty"`
+	Agent             string `json:"agent,omitempty"`
+	ProjectID         string `json:"project_id,omitempty"`
+	ParentSessionID   string `json:"parent_session_id,omitempty"`
+	WorkspaceID       string `json:"workspace_id,omitempty"`
+	Model             string `json:"model,omitempty"`
+}
+
+// ProjectSnapshot is a batch-level snapshot of OpenCode project metadata
+// included alongside usage records. One per distinct project referenced
+// by sessions in the batch.
+type ProjectSnapshot struct {
+	ExternalProjectID string `json:"external_project_id"`
+	Title             string `json:"title,omitempty"`
+	Worktree          string `json:"worktree,omitempty"`
+}
+
+// ProjectDirectorySnapshot is a batch-level snapshot of a project directory
+// mapping from the OpenCode source database.
+type ProjectDirectorySnapshot struct {
+	ExternalProjectID string `json:"external_project_id"`
+	Path              string `json:"path"`
+}
+
+// TodoSnapshot is a batch-level snapshot of an OpenCode todo item for a
+// session in the current batch.
+type TodoSnapshot struct {
+	ExternalSessionID string `json:"external_session_id"`
+	Description       string `json:"description"`
+	Status            string `json:"status,omitempty"`
+}
+
 // IngestRequest is the full payload sent in a POST /ingest request.
 type IngestRequest struct {
-	SchemaVersion    string         `json:"schema_version"`
-	CollectorVersion string         `json:"collector_version"`
-	ClientHostname   string         `json:"client_hostname"`
-	SourceDatabaseID string         `json:"source_database_id"`
-	Records          []IngestRecord `json:"records"`
+	SchemaVersion             string                     `json:"schema_version"`
+	CollectorVersion          string                     `json:"collector_version"`
+	ClientHostname            string                     `json:"client_hostname"`
+	SourceDatabaseID          string                     `json:"source_database_id"`
+	Records                   []IngestRecord             `json:"records"`
+	SessionContexts           []SessionContext            `json:"session_contexts,omitempty"`
+	ProjectSnapshots          []ProjectSnapshot           `json:"project_snapshots,omitempty"`
+	ProjectDirectorySnapshots []ProjectDirectorySnapshot  `json:"project_directory_snapshots,omitempty"`
+	TodoSnapshots             []TodoSnapshot              `json:"todo_snapshots,omitempty"`
 }
 
 // BatchResult describes the outcome for a single record in an ingest batch.
@@ -72,4 +121,50 @@ type IngestResponse struct {
 	AcceptedCount  int           `json:"accepted_count"`
 	RejectedCount  int           `json:"rejected_count"`
 	Results        []BatchResult `json:"results"`
+}
+
+// ---------------------------------------------------------------------------
+// Projection mapping functions — convert sqlite projection data to wire types
+// ---------------------------------------------------------------------------
+
+// MapToSessionContext converts a sqlite.SessionContextData to a wire-format
+// SessionContext for inclusion in the ingest payload.
+func MapToSessionContext(data sqlite.SessionContextData) SessionContext {
+	return SessionContext{
+		ExternalSessionID: data.ExternalSessionID,
+		Title:             data.Title,
+		Agent:             data.Agent,
+		ProjectID:         data.ProjectID,
+		ParentSessionID:   data.ParentSessionID,
+		WorkspaceID:       data.WorkspaceID,
+		Model:             data.Model,
+	}
+}
+
+// MapToProjectSnapshot converts a sqlite.ProjectData to a wire-format
+// ProjectSnapshot.
+func MapToProjectSnapshot(data sqlite.ProjectData) ProjectSnapshot {
+	return ProjectSnapshot{
+		ExternalProjectID: data.ExternalProjectID,
+		Title:             data.Title,
+		Worktree:          data.Worktree,
+	}
+}
+
+// MapToProjectDirectorySnapshot converts a sqlite.ProjectDirectoryData to a
+// wire-format ProjectDirectorySnapshot.
+func MapToProjectDirectorySnapshot(data sqlite.ProjectDirectoryData) ProjectDirectorySnapshot {
+	return ProjectDirectorySnapshot{
+		ExternalProjectID: data.ExternalProjectID,
+		Path:              data.Path,
+	}
+}
+
+// MapToTodoSnapshot converts a sqlite.TodoData to a wire-format TodoSnapshot.
+func MapToTodoSnapshot(data sqlite.TodoData) TodoSnapshot {
+	return TodoSnapshot{
+		ExternalSessionID: data.ExternalSessionID,
+		Description:       data.Description,
+		Status:            data.Status,
+	}
 }
