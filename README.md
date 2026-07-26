@@ -36,6 +36,7 @@ Each collector:
 | `GATEWAY_BASE_URL` | **Yes** | — | Base URL of the Gateway API |
 | `GATEWAY_COLLECTOR_POLL_INTERVAL` | No | `60s` | How often to poll for new usage records |
 | `GATEWAY_COLLECTOR_HEARTBEAT_INTERVAL` | No | `120s` | How often to send heartbeats when idle |
+| `GATEWAY_COLLECTOR_BATCH_LIMIT` | No | `100` | Maximum usage records sent in one ingest batch |
 | `GATEWAY_COLLECTOR_SQLITE_PATH` | No | `""` | Path to a single SQLite database file |
 | `GATEWAY_COLLECTOR_SQLITE_DIR` | No | `~/.local/share/opencode/` (Linux) / `%APPDATA%/OpenCode/` (Windows) | Directory containing OpenCode SQLite databases |
 | `GATEWAY_COLLECTOR_LOG_LEVEL` | No | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
