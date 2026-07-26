@@ -1,84 +1,93 @@
-// Package exclusion provides persistent tracking for databases that fail schema
-// inspection. Excluded databases are recorded on disk and skipped on subsequent
-// poll cycles, with automatic recheck after a configurable interval.
+// Package exclusion provides a persistent gate for databases that fail schema
+// inspection. Excluded databases are recorded as JSON files keyed by path hash
+// and are automatically rechecked after a configurable interval.
 package exclusion
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/opencode-gateway/collectors/internal/pathutil"
 )
 
 // DefaultRecheckInterval is the default duration before an excluded database is
-// reconsidered.
+// rechecked.
 const DefaultRecheckInterval = 3 * time.Hour
 
-// excludeRecord is the JSON structure persisted for each excluded database.
-type excludeRecord struct {
+// entry represents a single exclusion record persisted to disk.
+type entry struct {
 	Path        string    `json:"path"`
 	Reason      string    `json:"reason"`
 	ExcludedAt  time.Time `json:"excluded_at"`
 	NextRecheck time.Time `json:"next_recheck"`
 }
 
-// Gate persistently tracks databases that fail schema inspection, allowing the
-// collector to skip them without re-opening on subsequent poll cycles. Excluded
-// databases are rechecked after a configurable interval.
+// Gate manages persistent exclusions for databases that fail schema inspection.
+// Each exclusion is stored as an individual JSON file in the .collector-gate/
+// subdirectory under the cursor directory, keyed by sha256 of the cleaned
+// absolute path.
 type Gate struct {
 	mu              sync.Mutex
-	baseDir         string
-	recheckInterval time.Duration
+	cursorDir       string
 	gateDir         string
+	recheckInterval time.Duration
 }
 
-// NewGate creates a new Gate. Exclusion records are persisted under
-// baseDir/.collector-gate/. If recheckInterval is zero, DefaultRecheckInterval
-// (3 hours) is used.
-func NewGate(baseDir string, recheckInterval time.Duration) (*Gate, error) {
-	if recheckInterval == 0 {
+// NewGate creates a new Gate. Exclusion files are stored under
+// cursorDir/.collector-gate/. If recheckInterval is zero or negative,
+// DefaultRecheckInterval (3 hours) is used. The gate directory is created
+// if it does not exist.
+func NewGate(cursorDir string, recheckInterval time.Duration) *Gate {
+	if recheckInterval <= 0 {
 		recheckInterval = DefaultRecheckInterval
 	}
-
-	gateDir := filepath.Join(baseDir, ".collector-gate")
-	if err := os.MkdirAll(gateDir, 0o755); err != nil {
-		return nil, fmt.Errorf("creating gate directory: %w", err)
-	}
-
+	gateDir := filepath.Join(cursorDir, ".collector-gate")
+	// Best-effort creation of the gate directory.
+	_ = os.MkdirAll(gateDir, 0o755)
 	return &Gate{
-		baseDir:         baseDir,
-		recheckInterval: recheckInterval,
+		cursorDir:       cursorDir,
 		gateDir:         gateDir,
-	}, nil
+		recheckInterval: recheckInterval,
+	}
 }
 
-// IsExcluded returns true if the given path has been excluded and its .exclude
-// file exists and is parseable.
-func (g *Gate) IsExcluded(path string) bool {
-	exPath, err := g.excludeFilePath(path)
+// IsExcluded checks whether the given database path has an active exclusion.
+// Returns true if an exclusion file exists and can be read successfully.
+func (g *Gate) IsExcluded(path string) (bool, error) {
+	pathHash, err := pathutil.HashPath(path)
 	if err != nil {
-		return false
+		return false, err
 	}
 
-	data, err := os.ReadFile(exPath)
+	entryPath := filepath.Join(g.gateDir, pathHash+".exclude")
+	if _, err := os.Stat(entryPath); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("checking exclusion: %w", err)
+	}
+
+	// Verify the file is readable and valid.
+	var e entry
+	data, err := os.ReadFile(entryPath)
 	if err != nil {
-		return false
+		return false, fmt.Errorf("reading exclusion file: %w", err)
+	}
+	if err := json.Unmarshal(data, &e); err != nil {
+		// Corrupt file — treat as not excluded but don't delete.
+		return false, nil
 	}
 
-	var rec excludeRecord
-	if err := json.Unmarshal(data, &rec); err != nil {
-		return false
-	}
-
-	return true
+	return true, nil
 }
 
-// Exclude writes a .exclude file for the given database path, recording the
-// reason and setting next_recheck to now + recheckInterval.
+// Exclude writes an exclusion file for the given database path. The reason is
+// recorded for observability. The next_recheck is set to current time plus the
+// configured recheck interval.
 func (g *Gate) Exclude(path string, reason string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -88,25 +97,30 @@ func (g *Gate) Exclude(path string, reason string) error {
 		return fmt.Errorf("resolving absolute path: %w", err)
 	}
 
+	pathHash, err := pathutil.HashPath(absPath)
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(g.gateDir, 0o755); err != nil {
+		return fmt.Errorf("creating gate directory: %w", err)
+	}
+
 	now := time.Now()
-	rec := excludeRecord{
+	e := entry{
 		Path:        absPath,
 		Reason:      reason,
 		ExcludedAt:  now,
 		NextRecheck: now.Add(g.recheckInterval),
 	}
 
-	data, err := json.MarshalIndent(rec, "", "  ")
+	data, err := json.MarshalIndent(e, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshalling exclusion record: %w", err)
+		return fmt.Errorf("marshalling exclusion entry: %w", err)
 	}
 
-	exPath, err := g.excludeFilePath(absPath)
-	if err != nil {
-		return err
-	}
-
-	if err := os.WriteFile(exPath, data, 0o644); err != nil {
+	entryPath := filepath.Join(g.gateDir, pathHash+".exclude")
+	if err := os.WriteFile(entryPath, data, 0o644); err != nil {
 		return fmt.Errorf("writing exclusion file: %w", err)
 	}
 
@@ -114,37 +128,43 @@ func (g *Gate) Exclude(path string, reason string) error {
 }
 
 // RecheckDue returns true if the current time is at or past the next_recheck
-// timestamp for the given path. Returns true if the path is not excluded or
-// the exclusion file is corrupt, so the caller always rechecks when in doubt.
-func (g *Gate) RecheckDue(path string) bool {
-	exPath, err := g.excludeFilePath(path)
+// timestamp for the given path. Returns false if the path is not excluded.
+func (g *Gate) RecheckDue(path string) (bool, error) {
+	pathHash, err := pathutil.HashPath(path)
 	if err != nil {
-		return true
+		return false, err
 	}
 
-	data, err := os.ReadFile(exPath)
+	entryPath := filepath.Join(g.gateDir, pathHash+".exclude")
+	data, err := os.ReadFile(entryPath)
 	if err != nil {
-		return true
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("reading exclusion file: %w", err)
 	}
 
-	var rec excludeRecord
-	if err := json.Unmarshal(data, &rec); err != nil {
-		return true
+	var e entry
+	if err := json.Unmarshal(data, &e); err != nil {
+		// Corrupt file — treat as due for recheck.
+		return true, nil
 	}
 
-	return !time.Now().Before(rec.NextRecheck)
+	return !time.Now().Before(e.NextRecheck), nil
 }
 
-// Remove deletes the .exclude file for the given path, allowing the database
-// to be reconsidered on the next poll cycle. Removing an already-removed path
-// returns nil.
+// Remove deletes the exclusion file for the given database path. No error is
+// returned if the exclusion does not exist.
 func (g *Gate) Remove(path string) error {
-	exPath, err := g.excludeFilePath(path)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	pathHash, err := pathutil.HashPath(path)
 	if err != nil {
 		return err
 	}
-
-	if err := os.Remove(exPath); err != nil {
+	entryPath := filepath.Join(g.gateDir, pathHash+".exclude")
+	if err := os.Remove(entryPath); err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
@@ -152,25 +172,4 @@ func (g *Gate) Remove(path string) error {
 	}
 
 	return nil
-}
-
-// excludeFilePath returns the path to the .exclude file for the given database
-// path. The path is normalized (abs + clean) and hashed with SHA-256.
-func (g *Gate) excludeFilePath(path string) (string, error) {
-	pathHash, err := hashPath(path)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(g.gateDir, pathHash+".exclude"), nil
-}
-
-// hashPath returns the hex-encoded SHA-256 hash of the cleaned, absolute path,
-// identical to the hashPath function in internal/state.
-func hashPath(path string) (string, error) {
-	absPath, err := filepath.Abs(filepath.Clean(path))
-	if err != nil {
-		return "", fmt.Errorf("resolving absolute path: %w", err)
-	}
-	hash := sha256.Sum256([]byte(absPath))
-	return hex.EncodeToString(hash[:]), nil
 }

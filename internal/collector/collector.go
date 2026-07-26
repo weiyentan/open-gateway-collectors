@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/opencode-gateway/collectors/internal/config"
+	"github.com/opencode-gateway/collectors/internal/exclusion"
 	"github.com/opencode-gateway/collectors/internal/gateway"
 	"github.com/opencode-gateway/collectors/internal/heartbeat"
 	"github.com/opencode-gateway/collectors/internal/identity"
@@ -32,6 +33,7 @@ type Collector struct {
 	gwClient      *gateway.Client
 	tracker       *state.Tracker
 	identityStore *identity.Store
+	exclusionGate *exclusion.Gate
 	logger        *slog.Logger
 	hostname      string
 	version       string
@@ -81,6 +83,7 @@ func NewCollector(cfg *config.Config, version string) (*Collector, error) {
 		gwClient:      gateway.NewClient(cfg.BaseURL, cfg.Token, hostname),
 		tracker:       tracker,
 		identityStore: identity.NewStore(cfg.CursorDir),
+		exclusionGate: exclusion.NewGate(cfg.CursorDir, cfg.ExcludeRecheckInterval),
 		logger:        logger,
 		hostname:      hostname,
 		version:       version,
@@ -150,9 +153,11 @@ func (c *Collector) iterate(ctx context.Context) {
 
 // resolveDatabases discovers all source database paths and resolves their
 // identities. If SQLitePath is set, it uses that single file; otherwise it
-// scans SQLiteDir for .db files. Each candidate is opened and inspected —
-// databases that fail inspection are skipped with a warning. Identity is
-// resolved (or created) for each valid database.
+// scans SQLiteDir for .db files. Excluded databases whose recheck is not due
+// are skipped without opening. Candidates that fail inspection are excluded
+// via the gate and skipped. Databases that pass a recheck are re-admitted
+// and processed normally. Identity is resolved (or created) for each valid
+// database.
 func (c *Collector) resolveDatabases() ([]dbIdentity, error) {
 	var paths []string
 
@@ -168,13 +173,56 @@ func (c *Collector) resolveDatabases() ([]dbIdentity, error) {
 
 	var dbs []dbIdentity
 	for _, path := range paths {
-		dbInfo, err := sqlite.OpenAndInspect(path)
+		// Gate check — fast path: skip excluded DBs whose recheck isn't due.
+		excluded := false
+		excludedBool, err := c.exclusionGate.IsExcluded(path)
 		if err != nil {
-			c.logger.Warn("skipping source database — inspection failed",
+			c.logger.Warn("exclusion check failed — proceeding with inspection",
 				"path", path,
 				"error", err,
 			)
+		} else {
+			excluded = excludedBool
+			if excluded {
+				due, err := c.exclusionGate.RecheckDue(path)
+				if err != nil {
+					c.logger.Warn("recheck check failed — proceeding with re-inspection",
+						"path", path,
+						"error", err,
+					)
+				} else if !due {
+					continue // skip without opening the file
+				}
+				// Recheck is due — fall through to OpenAndInspect.
+			}
+		}
+
+		dbInfo, err := sqlite.OpenAndInspect(path)
+		if err != nil {
+			c.logger.Warn("gate failed — excluding database",
+				"path", path,
+				"error", err,
+			)
+			if exclErr := c.exclusionGate.Exclude(path, err.Error()); exclErr != nil {
+				c.logger.Warn("failed to persist exclusion",
+					"path", path,
+					"error", exclErr,
+				)
+			}
 			continue
+		}
+
+		// Passed inspection — if was previously excluded, re-admit.
+		if excluded {
+			c.logger.Info("database re-admitted after passing recheck",
+				"path", path,
+			)
+			if rmErr := c.exclusionGate.Remove(path); rmErr != nil {
+				c.logger.Warn("failed to remove exclusion after re-admission",
+					"path", path,
+					"error", rmErr,
+				)
+			}
 		}
 
 		id, err := c.identityStore.GetOrCreateIdentity(path)

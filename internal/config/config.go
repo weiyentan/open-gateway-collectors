@@ -39,6 +39,10 @@ type Config struct {
 	// CursorDir is the directory where cursor state files are persisted.
 	// Defaults to the working directory.
 	CursorDir string `env:"GATEWAY_COLLECTOR_CURSOR_DIR"`
+
+	// ExcludeRecheckInterval is how often to recheck an excluded database.
+	// Defaults to 3 hours.
+	ExcludeRecheckInterval time.Duration `env:"GATEWAY_COLLECTOR_EXCLUDE_RECHECK_INTERVAL"`
 }
 
 // Load reads configuration from environment variables with defaults.
@@ -51,8 +55,9 @@ func Load() (*Config, error) {
 		HeartbeatInterval: getDurationEnv("GATEWAY_COLLECTOR_HEARTBEAT_INTERVAL", 120*time.Second),
 		SQLitePath:        os.Getenv("GATEWAY_COLLECTOR_SQLITE_PATH"),
 		SQLiteDir:         getEnvWithDefault("GATEWAY_COLLECTOR_SQLITE_DIR", defaultSQLiteDir()),
-		LogLevel:          getEnvWithDefault("GATEWAY_COLLECTOR_LOG_LEVEL", "info"),
-		CursorDir:         getEnvWithDefault("GATEWAY_COLLECTOR_CURSOR_DIR", defaultCursorDir()),
+		LogLevel:               getEnvWithDefault("GATEWAY_COLLECTOR_LOG_LEVEL", "info"),
+		CursorDir:              getEnvWithDefault("GATEWAY_COLLECTOR_CURSOR_DIR", defaultCursorDir()),
+		ExcludeRecheckInterval: getDurationEnv("GATEWAY_COLLECTOR_EXCLUDE_RECHECK_INTERVAL", 3*time.Hour),
 	}
 
 	if err := cfg.Validate(); err != nil {
