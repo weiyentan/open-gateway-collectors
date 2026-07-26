@@ -33,6 +33,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.HeartbeatInterval != 120*time.Second {
 		t.Errorf("HeartbeatInterval = %v, want %v", cfg.HeartbeatInterval, 120*time.Second)
 	}
+	if cfg.BatchLimit != 100 {
+		t.Errorf("BatchLimit = %d, want %d", cfg.BatchLimit, 100)
+	}
 	if cfg.LogLevel != "info" {
 		t.Errorf("LogLevel = %q, want %q", cfg.LogLevel, "info")
 	}
@@ -47,6 +50,7 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv("GATEWAY_BASE_URL", "https://gateway.example.com")
 	t.Setenv("GATEWAY_COLLECTOR_POLL_INTERVAL", "30s")
 	t.Setenv("GATEWAY_COLLECTOR_HEARTBEAT_INTERVAL", "60s")
+	t.Setenv("GATEWAY_COLLECTOR_BATCH_LIMIT", "25")
 	t.Setenv("GATEWAY_COLLECTOR_SQLITE_PATH", "/custom/path/db.sqlite")
 	t.Setenv("GATEWAY_COLLECTOR_SQLITE_DIR", "/custom/sqlite")
 	t.Setenv("GATEWAY_COLLECTOR_LOG_LEVEL", "debug")
@@ -68,6 +72,9 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.HeartbeatInterval != 60*time.Second {
 		t.Errorf("HeartbeatInterval = %v, want %v", cfg.HeartbeatInterval, 60*time.Second)
+	}
+	if cfg.BatchLimit != 25 {
+		t.Errorf("BatchLimit = %d, want %d", cfg.BatchLimit, 25)
 	}
 	if cfg.SQLitePath != "/custom/path/db.sqlite" {
 		t.Errorf("SQLitePath = %q, want %q", cfg.SQLitePath, "/custom/path/db.sqlite")
@@ -133,6 +140,7 @@ func TestValidateLogLevel(t *testing.T) {
 				BaseURL:           "http://localhost",
 				PollInterval:      60 * time.Second,
 				HeartbeatInterval: 120 * time.Second,
+				BatchLimit:        100,
 				LogLevel:          tt.level,
 			}
 			err := cfg.Validate()
@@ -149,6 +157,7 @@ func TestValidatePollInterval(t *testing.T) {
 		BaseURL:           "http://localhost",
 		PollInterval:      0,
 		HeartbeatInterval: 120 * time.Second,
+		BatchLimit:        100,
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Error("Validate() expected error for zero poll interval")
@@ -161,9 +170,23 @@ func TestValidateHeartbeatInterval(t *testing.T) {
 		BaseURL:           "http://localhost",
 		PollInterval:      60 * time.Second,
 		HeartbeatInterval: -1,
+		BatchLimit:        100,
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Error("Validate() expected error for negative heartbeat interval")
+	}
+}
+
+func TestValidateBatchLimit(t *testing.T) {
+	cfg := &Config{
+		Token:             "t",
+		BaseURL:           "http://localhost",
+		PollInterval:      60 * time.Second,
+		HeartbeatInterval: 120 * time.Second,
+		BatchLimit:        0,
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate() expected error for zero batch limit")
 	}
 }
 
@@ -176,6 +199,7 @@ func saveEnv() map[string]string {
 		"GATEWAY_BASE_URL",
 		"GATEWAY_COLLECTOR_POLL_INTERVAL",
 		"GATEWAY_COLLECTOR_HEARTBEAT_INTERVAL",
+		"GATEWAY_COLLECTOR_BATCH_LIMIT",
 		"GATEWAY_COLLECTOR_SQLITE_PATH",
 		"GATEWAY_COLLECTOR_SQLITE_DIR",
 		"GATEWAY_COLLECTOR_LOG_LEVEL",
@@ -206,6 +230,7 @@ func clearEnv() {
 		"GATEWAY_BASE_URL",
 		"GATEWAY_COLLECTOR_POLL_INTERVAL",
 		"GATEWAY_COLLECTOR_HEARTBEAT_INTERVAL",
+		"GATEWAY_COLLECTOR_BATCH_LIMIT",
 		"GATEWAY_COLLECTOR_SQLITE_PATH",
 		"GATEWAY_COLLECTOR_SQLITE_DIR",
 		"GATEWAY_COLLECTOR_LOG_LEVEL",

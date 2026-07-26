@@ -68,6 +68,7 @@ func testConfig(baseURL string) *config.Config {
 		BaseURL:                baseURL,
 		PollInterval:           100 * time.Millisecond,
 		HeartbeatInterval:      200 * time.Millisecond,
+		BatchLimit:             100,
 		LogLevel:               "debug",
 		CursorDir:              "",
 		ExcludeRecheckInterval: 3 * time.Hour,
@@ -140,13 +141,14 @@ func TestCollector_ResolveDatabases_SinglePath(t *testing.T) {
 	dbPath := createTestDB(t, dir, "test")
 
 	cfg := config.Config{
-		Token:      "tok",
-		BaseURL:    "http://localhost",
-		SQLitePath: dbPath,
-		LogLevel:   "debug",
-		CursorDir:  dir,
-		PollInterval:       60 * time.Second,
-		HeartbeatInterval:  120 * time.Second,
+		Token:             "tok",
+		BaseURL:           "http://localhost",
+		SQLitePath:        dbPath,
+		LogLevel:          "debug",
+		CursorDir:         dir,
+		PollInterval:      60 * time.Second,
+		HeartbeatInterval: 120 * time.Second,
+		BatchLimit:        100,
 	}
 
 	c, err := NewCollector(&cfg, "test")
@@ -180,13 +182,14 @@ func TestCollector_ResolveDatabases_SkipsNonDB(t *testing.T) {
 	}
 
 	cfg := config.Config{
-		Token:      "tok",
-		BaseURL:    "http://localhost",
-		SQLiteDir:  dir,
-		LogLevel:   "debug",
-		CursorDir:  dir,
-		PollInterval:       60 * time.Second,
-		HeartbeatInterval:  120 * time.Second,
+		Token:             "tok",
+		BaseURL:           "http://localhost",
+		SQLiteDir:         dir,
+		LogLevel:          "debug",
+		CursorDir:         dir,
+		PollInterval:      60 * time.Second,
+		HeartbeatInterval: 120 * time.Second,
+		BatchLimit:        100,
 	}
 
 	c, err := NewCollector(&cfg, "test")
@@ -219,6 +222,7 @@ func TestCollector_ResolveDatabases_SkipsExcludedDB(t *testing.T) {
 		CursorDir:         dir,
 		PollInterval:      60 * time.Second,
 		HeartbeatInterval: 120 * time.Second,
+		BatchLimit:        100,
 		ExcludeRecheckInterval: 1 * time.Hour, // recheck not due during test
 	}
 
@@ -253,6 +257,7 @@ func TestCollector_ResolveDatabases_RecheckDueDBReinspected(t *testing.T) {
 		CursorDir:         dir,
 		PollInterval:      60 * time.Second,
 		HeartbeatInterval: 120 * time.Second,
+		BatchLimit:        100,
 		ExcludeRecheckInterval: time.Nanosecond, // recheck due immediately
 	}
 
@@ -304,6 +309,7 @@ func TestCollector_ResolveDatabases_ExcludesOnFirstFailure(t *testing.T) {
 		CursorDir:         dir,
 		PollInterval:      60 * time.Second,
 		HeartbeatInterval: 120 * time.Second,
+		BatchLimit:        100,
 		ExcludeRecheckInterval: 1 * time.Hour, // prevent immediate recheck
 	}
 
@@ -497,6 +503,50 @@ func TestCollector_ClientHostnameSetOnRequest(t *testing.T) {
 	}
 	if req.ClientHostname == "" {
 		t.Error("ClientHostname is empty — should be set by gateway client")
+	}
+}
+
+func TestCollector_UsesConfiguredBatchLimit(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	srv, lastReq := gatewayServer(http.StatusCreated, gateway.IngestResponse{
+		BatchID:       "batch-limited",
+		AcceptedCount: 3,
+	})
+
+	cfg := testConfig(srv.URL)
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.BatchLimit = 3
+
+	c, err := NewCollector(cfg, "0.1.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	mock := &mockReader{records: makeRecords([]string{"rec-1", "rec-2", "rec-3", "rec-4"}, now)}
+	c.newReader = func(_ string) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+	if len(dbs) != 1 {
+		t.Fatalf("expected 1 DB, got %d", len(dbs))
+	}
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	req, ok := lastReq.Load().(gateway.IngestRequest)
+	if !ok {
+		t.Fatal("no request received by gateway")
+	}
+	if len(req.Records) != 3 {
+		t.Fatalf("expected 3 records from configured batch limit, got %d", len(req.Records))
 	}
 }
 

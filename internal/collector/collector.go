@@ -20,8 +20,6 @@ import (
 	"github.com/opencode-gateway/collectors/internal/state"
 )
 
-const defaultBatchLimit = 500
-
 // readerFactory creates a sqlite.Reader for the given database path along
 // with a close function. Injected for testability.
 type readerFactory func(dbPath string) (sqlite.Reader, func(), error)
@@ -71,6 +69,7 @@ func NewCollector(cfg *config.Config, version string) (*Collector, error) {
 		"base_url", cfg.BaseURL,
 		"poll_interval", cfg.PollInterval.String(),
 		"heartbeat_interval", cfg.HeartbeatInterval.String(),
+		"batch_limit", cfg.BatchLimit,
 		"log_level", cfg.LogLevel,
 	)
 
@@ -89,7 +88,7 @@ func NewCollector(cfg *config.Config, version string) (*Collector, error) {
 		hostname:      hostname,
 		version:       version,
 		lastSuccess:   make(map[string]time.Time),
-		batchLimit:    defaultBatchLimit,
+		batchLimit:    cfg.BatchLimit,
 		newReader:     defaultReaderFactory,
 	}, nil
 }

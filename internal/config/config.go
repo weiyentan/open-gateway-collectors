@@ -8,8 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"time"
 )
+
+const defaultBatchLimit = 100
 
 // Config holds all configuration for the collector application.
 type Config struct {
@@ -24,6 +27,9 @@ type Config struct {
 
 	// HeartbeatInterval is how often to send heartbeats when no new records exist.
 	HeartbeatInterval time.Duration `env:"GATEWAY_COLLECTOR_HEARTBEAT_INTERVAL"`
+
+	// BatchLimit is the maximum number of usage records sent in one ingest batch.
+	BatchLimit int `env:"GATEWAY_COLLECTOR_BATCH_LIMIT"`
 
 	// SQLitePath is the path to a single OpenCode SQLite database file.
 	// If set, SQLiteDir is ignored.
@@ -53,8 +59,9 @@ func Load() (*Config, error) {
 		BaseURL:           os.Getenv("GATEWAY_BASE_URL"),
 		PollInterval:      getDurationEnv("GATEWAY_COLLECTOR_POLL_INTERVAL", 60*time.Second),
 		HeartbeatInterval: getDurationEnv("GATEWAY_COLLECTOR_HEARTBEAT_INTERVAL", 120*time.Second),
-		SQLitePath:        os.Getenv("GATEWAY_COLLECTOR_SQLITE_PATH"),
-		SQLiteDir:         getEnvWithDefault("GATEWAY_COLLECTOR_SQLITE_DIR", defaultSQLiteDir()),
+		BatchLimit:        getIntEnv("GATEWAY_COLLECTOR_BATCH_LIMIT", defaultBatchLimit),
+		SQLitePath:             os.Getenv("GATEWAY_COLLECTOR_SQLITE_PATH"),
+		SQLiteDir:              getEnvWithDefault("GATEWAY_COLLECTOR_SQLITE_DIR", defaultSQLiteDir()),
 		LogLevel:               getEnvWithDefault("GATEWAY_COLLECTOR_LOG_LEVEL", "info"),
 		CursorDir:              getEnvWithDefault("GATEWAY_COLLECTOR_CURSOR_DIR", defaultCursorDir()),
 		ExcludeRecheckInterval: getDurationEnv("GATEWAY_COLLECTOR_EXCLUDE_RECHECK_INTERVAL", 3*time.Hour),
@@ -80,6 +87,9 @@ func (c *Config) Validate() error {
 	}
 	if c.HeartbeatInterval <= 0 {
 		return fmt.Errorf("GATEWAY_COLLECTOR_HEARTBEAT_INTERVAL must be positive")
+	}
+	if c.BatchLimit <= 0 {
+		return fmt.Errorf("GATEWAY_COLLECTOR_BATCH_LIMIT must be positive")
 	}
 	switch c.LogLevel {
 	case "debug", "info", "warn", "error", "":
@@ -127,6 +137,19 @@ func getDurationEnv(key string, defaultVal time.Duration) time.Duration {
 		return defaultVal
 	}
 	return d
+}
+
+// getIntEnv reads an integer environment variable or returns the default.
+func getIntEnv(key string, defaultVal int) int {
+	val := os.Getenv(key)
+	if val == "" {
+		return defaultVal
+	}
+	i, err := strconv.Atoi(val)
+	if err != nil {
+		return defaultVal
+	}
+	return i
 }
 
 // getEnvWithDefault reads an environment variable or returns the default.
