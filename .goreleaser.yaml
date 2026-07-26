@@ -27,7 +27,7 @@ builds:
       - goos: linux
         goarch: arm64
     ldflags:
-      - -s -w
+      - -s -w -X main.Version={{ .Version }}
 
 archives:
   - id: default
