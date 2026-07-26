@@ -117,8 +117,10 @@ const (
 			"input": 150,
 			"output": 75,
 			"reasoning": 0,
-			"cache_read": 20,
-			"cache_write": 10,
+			"cache": {
+				"read": 20,
+				"write": 10
+			},
 			"total": 255
 		}
 	}`
@@ -161,8 +163,10 @@ const (
 			"input": 500,
 			"output": 200,
 			"reasoning": 0,
-			"cache_read": 100,
-			"cache_write": 50,
+			"cache": {
+				"read": 100,
+				"write": 50
+			},
 			"total": 850
 		}
 	}`

@@ -74,7 +74,7 @@ func createIntegrationTestDB(t *testing.T) string {
 	// Insert a message with a data JSON blob containing all enrichment fields.
 	// The message.data JSON must match the structure expected by the reader's
 	// mapRecord() function (messageData struct): providerID, modelID, cost,
-	// finish, mode, tokens: { input, output, reasoning, cache_read, cache_write, total }.
+	// finish, mode, tokens: { input, output, reasoning, cache: { read, write }, total }.
 	enrichedDataJSON := `{
 		"providerID": "openai",
 		"modelID": "gpt-4o",
@@ -85,8 +85,10 @@ func createIntegrationTestDB(t *testing.T) string {
 			"input": 500,
 			"output": 200,
 			"reasoning": 75,
-			"cache_read": 100,
-			"cache_write": 50,
+			"cache": {
+				"read": 100,
+				"write": 50
+			},
 			"total": 925
 		}
 	}`
