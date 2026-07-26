@@ -21,8 +21,10 @@ import (
 )
 
 // readerFactory creates a sqlite.Reader for the given database path along
-// with a close function. Injected for testability.
-type readerFactory func(dbPath string) (sqlite.Reader, func(), error)
+// with a close function. The dbInfo parameter carries schema detection
+// results from OpenAndInspect so the reader can be schema-aware.
+// Injected for testability.
+type readerFactory func(dbPath string, dbInfo *sqlite.DatabaseInfo) (sqlite.Reader, func(), error)
 
 // Collector orchestrates the periodic discovery, reading, and pushing of
 // usage records from OpenCode source databases to the Gateway.
@@ -93,12 +95,14 @@ func NewCollector(cfg *config.Config, version string) (*Collector, error) {
 	}, nil
 }
 
-// defaultReaderFactory opens an OpenCodeReader in read-only mode.
-func defaultReaderFactory(dbPath string) (sqlite.Reader, func(), error) {
+// defaultReaderFactory opens an OpenCodeReader in read-only mode and attaches
+// the DatabaseInfo for schema-aware projection reading.
+func defaultReaderFactory(dbPath string, dbInfo *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
 	reader, err := sqlite.NewOpenCodeReader(dbPath)
 	if err != nil {
 		return nil, nil, err
 	}
+	reader.WithSchemaInfo(dbInfo)
 	return reader, func() { reader.Close() }, nil
 }
 
@@ -297,7 +301,7 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 		return
 	}
 
-	reader, closeFn, err := c.newReader(db.path)
+	reader, closeFn, err := c.newReader(db.path, db.dbInfo)
 	if err != nil {
 		logger.Error("failed to open reader", "error", err)
 		return
@@ -311,29 +315,58 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 	}
 
 	if len(records) > 0 {
-		c.sendRecords(ctx, db, records, logger)
+		// Extract unique session IDs and project IDs from the records
+		// for projection reads.
+		sessionIDs := uniqueSessionIDs(records)
+		projectIDs := uniqueProjectIDs(records)
+
+		sessionCtxs, _ := reader.ReadSessionContexts(sessionIDs)
+		projects, _ := reader.ReadProjectData(projectIDs)
+		projectDirs, _ := reader.ReadProjectDirectoryData(projectIDs)
+		todos, _ := reader.ReadTodoData(sessionIDs)
+
+		c.sendRecords(ctx, db, records, sessionCtxs, projects, projectDirs, todos, logger)
 	} else {
 		c.maybeSendHeartbeat(ctx, db, logger)
 	}
 }
 
 // sendRecords converts sqlite usage records to ingest records, builds an
-// IngestRequest, POSTs it to the Gateway, and updates the cursor on success.
-// The cursor is advanced to the maximum occurred_at timestamp in the batch.
-// On failure, the cursor is NOT updated — the same records will be retried
-// on the next iteration.
-func (c *Collector) sendRecords(ctx context.Context, db dbIdentity, records []sqlite.UsageRecord, logger *slog.Logger) {
+// IngestRequest with batch-level projection snapshots, POSTs it to the
+// Gateway, and updates the cursor on success. The cursor is advanced to the
+// maximum occurred_at timestamp in the batch. On failure, the cursor is NOT
+// updated — the same records will be retried on the next iteration.
+func (c *Collector) sendRecords(
+	ctx context.Context,
+	db dbIdentity,
+	records []sqlite.UsageRecord,
+	sessionCtxs []sqlite.SessionContextData,
+	projects []sqlite.ProjectData,
+	projectDirs []sqlite.ProjectDirectoryData,
+	todos []sqlite.TodoData,
+	logger *slog.Logger,
+) {
 	ingestRecords := make([]gateway.IngestRecord, 0, len(records))
 	for i := range records {
 		gwRec := ToGatewayUsageRecord(records[i])
 		ingestRecords = append(ingestRecords, gateway.MapToIngestRecord(gwRec))
 	}
 
+	// Map projections to wire types with de-duplication.
+	reqSessionCtxs := dedupSessionContexts(sessionCtxs)
+	reqProjects := dedupProjectSnapshots(projects)
+	reqProjectDirs := dedupProjectDirectorySnapshots(projectDirs)
+	reqTodos := dedupTodoSnapshots(todos)
+
 	req := &gateway.IngestRequest{
-		SchemaVersion:    gateway.SchemaVersion,
-		CollectorVersion: c.version,
-		SourceDatabaseID: db.id,
-		Records:          ingestRecords,
+		SchemaVersion:              gateway.SchemaVersion,
+		CollectorVersion:           c.version,
+		SourceDatabaseID:           db.id,
+		Records:                    ingestRecords,
+		SessionContexts:            reqSessionCtxs,
+		ProjectSnapshots:           reqProjects,
+		ProjectDirectorySnapshots:  reqProjectDirs,
+		TodoSnapshots:              reqTodos,
 	}
 
 	resp, err := c.gwClient.SendBatch(ctx, req)
@@ -371,6 +404,10 @@ func (c *Collector) sendRecords(ctx context.Context, db dbIdentity, records []sq
 		"accepted", resp.AcceptedCount,
 		"rejected", resp.RejectedCount,
 		"cursor", maxOccurred.Format(time.RFC3339),
+		"session_contexts", len(reqSessionCtxs),
+		"project_snapshots", len(reqProjects),
+		"project_directory_snapshots", len(reqProjectDirs),
+		"todo_snapshots", len(reqTodos),
 	)
 }
 
@@ -448,4 +485,94 @@ func newLogger(level string) *slog.Logger {
 	}
 	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: l})
 	return slog.New(handler)
+}
+
+// ---------------------------------------------------------------------------
+// Projection helper functions
+// ---------------------------------------------------------------------------
+
+// uniqueSessionIDs extracts distinct, non-empty session IDs from usage
+// records for projection reading.
+func uniqueSessionIDs(records []sqlite.UsageRecord) []string {
+	seen := make(map[string]bool)
+	var result []string
+	for _, rec := range records {
+		if rec.SourceSessionID != "" && !seen[rec.SourceSessionID] {
+			seen[rec.SourceSessionID] = true
+			result = append(result, rec.SourceSessionID)
+		}
+	}
+	return result
+}
+
+// uniqueProjectIDs extracts distinct, non-empty project IDs from usage
+// records for projection reading.
+func uniqueProjectIDs(records []sqlite.UsageRecord) []string {
+	seen := make(map[string]bool)
+	var result []string
+	for _, rec := range records {
+		if rec.SourceProjectID != "" && !seen[rec.SourceProjectID] {
+			seen[rec.SourceProjectID] = true
+			result = append(result, rec.SourceProjectID)
+		}
+	}
+	return result
+}
+
+// dedupSessionContexts de-duplicates SessionContextData by ExternalSessionID
+// within a batch and maps to wire types.
+func dedupSessionContexts(data []sqlite.SessionContextData) []gateway.SessionContext {
+	seen := make(map[string]bool)
+	var result []gateway.SessionContext
+	for _, d := range data {
+		if d.ExternalSessionID != "" && !seen[d.ExternalSessionID] {
+			seen[d.ExternalSessionID] = true
+			result = append(result, gateway.MapToSessionContext(d))
+		}
+	}
+	return result
+}
+
+// dedupProjectSnapshots de-duplicates ProjectData by ExternalProjectID within
+// a batch and maps to wire types.
+func dedupProjectSnapshots(data []sqlite.ProjectData) []gateway.ProjectSnapshot {
+	seen := make(map[string]bool)
+	var result []gateway.ProjectSnapshot
+	for _, d := range data {
+		if d.ExternalProjectID != "" && !seen[d.ExternalProjectID] {
+			seen[d.ExternalProjectID] = true
+			result = append(result, gateway.MapToProjectSnapshot(d))
+		}
+	}
+	return result
+}
+
+// dedupProjectDirectorySnapshots de-duplicates ProjectDirectoryData by
+// ExternalProjectID within a batch and maps to wire types.
+func dedupProjectDirectorySnapshots(data []sqlite.ProjectDirectoryData) []gateway.ProjectDirectorySnapshot {
+	seen := make(map[string]bool)
+	var result []gateway.ProjectDirectorySnapshot
+	for _, d := range data {
+		key := d.ExternalProjectID + "\x00" + d.Path
+		if d.ExternalProjectID != "" && !seen[key] {
+			seen[key] = true
+			result = append(result, gateway.MapToProjectDirectorySnapshot(d))
+		}
+	}
+	return result
+}
+
+// dedupTodoSnapshots de-duplicates TodoData by combination of
+// ExternalSessionID and Description within a batch and maps to wire types.
+func dedupTodoSnapshots(data []sqlite.TodoData) []gateway.TodoSnapshot {
+	seen := make(map[string]bool)
+	var result []gateway.TodoSnapshot
+	for _, d := range data {
+		key := d.ExternalSessionID + "\x00" + d.Description
+		if d.ExternalSessionID != "" && !seen[key] {
+			seen[key] = true
+			result = append(result, gateway.MapToTodoSnapshot(d))
+		}
+	}
+	return result
 }

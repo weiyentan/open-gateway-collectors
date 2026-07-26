@@ -5,26 +5,28 @@ Lightweight per-host agents that read local OpenCode SQLite databases and push u
 ## Architecture Overview
 
 ```
-┌─────────────────────┐     ┌──────────────────────────┐
-│   OpenCode Host      │     │   Gateway Service         │
-│                      │     │                           │
-│  ┌──────────────┐   │     │  POST /ingest              │
-│  │ OpenCode      │   │────┼──► Idempotent dedup        │
-│  │ SQLite .db    │   │     │  └── Usage Records        │
-│  └──────┬───────┘   │     │                           │
-│         │           │     │  GET /health               │
-│  ┌──────▼───────┐   │◄────┼── Health check             │
-│  │  Collector    │   │     │                           │
-│  │  (this app)   │   │     └──────────────────────────┘
-│  └──────────────┘   │
-└─────────────────────┘
+┌─────────────────────┐     ┌──────────────────────────────────┐
+│   OpenCode Host      │     │   Gateway Service                 │
+│                      │     │                                  │
+│  ┌──────────────┐   │     │  POST /ingest                     │
+│  │ OpenCode      │   │────┼──► Idempotent dedup               │
+│  │ SQLite .db    │   │     │  ├── Usage Records               │
+│  └──────┬───────┘   │     │  ├── Session Contexts             │
+│         │           │     │  ├── Project Snapshots            │
+│  ┌──────▼───────┐   │     │  ├── Project Directory Snapshots  │
+│  │  Collector    │   │     │  └── Todo Snapshots              │
+│  │  (this app)   │   │     │                                  │
+│  └──────────────┘   │     │  GET /health                      │
+│         │           │◄────┼── Health check                    │
+└─────────────────────┘     └──────────────────────────────────┘
 ```
 
 Each collector:
 
 - Scans OpenCode SQLite database files for assistant message usage data
 - Extracts token counts, cost, model, and provider information
-- POSTs usage records to the Gateway's `/ingest` endpoint
+- Reads session context, project, project directory, and todo projection snapshots
+- POSTs usage records alongside projection snapshots to the Gateway's `/ingest` endpoint
 - Sends heartbeats when no new records are available
 - Persists cursors for incremental reads across restarts
 
@@ -126,11 +128,14 @@ This project follows standard Go project layout conventions:
 │       └── main.go             # Main entry point with signal handling
 ├── internal/                   # Private application packages
 │   ├── collector/              # Main orchestration loop & signal handling
+│   │                           #   + projection reads & dedup in sendRecords
 │   ├── config/                 # Environment variable configuration
 │   ├── gateway/                # Gateway HTTP client with retry logic
+│   │   └── types.go            # UsageRecord, IngestRequest, + projection types
 │   ├── heartbeat/              # Heartbeat (empty-batch) request builder
 │   ├── identity/               # Per-database UUID identity management
 │   ├── sqlite/                 # Database discovery, inspection & usage reader
+│   │   └── types.go            # UsageRecord, DatabaseInfo, + projection types
 │   └── state/                  # Cursor state persistence (tracker)
 ├── testdata/                   # SQLite test fixtures
 ├── go.mod

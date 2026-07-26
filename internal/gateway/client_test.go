@@ -6,9 +6,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/opencode-gateway/collectors/internal/sqlite"
 )
 
 func TestSendBatch_Success(t *testing.T) {
@@ -563,3 +566,254 @@ func TestNewClient_TrailingSlash(t *testing.T) {
 		t.Errorf("baseURL with trailing slash = %q, want %q", client.baseURL, "http://example.com")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Projection mapping tests
+// ---------------------------------------------------------------------------
+
+func TestMapToSessionContext_AllFields(t *testing.T) {
+	data := sqlite.SessionContextData{
+		ExternalSessionID: "sess-1",
+		Title:             "My Session",
+		Agent:             "claude",
+		ProjectID:         "proj-1",
+		ParentSessionID:   "parent-1",
+		WorkspaceID:       "ws-1",
+		Model:             "gpt-4",
+	}
+	result := MapToSessionContext(data)
+
+	if result.ExternalSessionID != "sess-1" {
+		t.Errorf("ExternalSessionID = %q, want %q", result.ExternalSessionID, "sess-1")
+	}
+	if result.Title != "My Session" {
+		t.Errorf("Title = %q, want %q", result.Title, "My Session")
+	}
+	if result.Agent != "claude" {
+		t.Errorf("Agent = %q, want %q", result.Agent, "claude")
+	}
+	if result.ProjectID != "proj-1" {
+		t.Errorf("ProjectID = %q, want %q", result.ProjectID, "proj-1")
+	}
+	if result.ParentSessionID != "parent-1" {
+		t.Errorf("ParentSessionID = %q, want %q", result.ParentSessionID, "parent-1")
+	}
+	if result.WorkspaceID != "ws-1" {
+		t.Errorf("WorkspaceID = %q, want %q", result.WorkspaceID, "ws-1")
+	}
+	if result.Model != "gpt-4" {
+		t.Errorf("Model = %q, want %q", result.Model, "gpt-4")
+	}
+}
+
+func TestMapToSessionContext_EmptyFields(t *testing.T) {
+	data := sqlite.SessionContextData{
+		ExternalSessionID: "sess-min",
+	}
+	result := MapToSessionContext(data)
+
+	if result.ExternalSessionID != "sess-min" {
+		t.Errorf("ExternalSessionID = %q, want %q", result.ExternalSessionID, "sess-min")
+	}
+	if result.Title != "" {
+		t.Errorf("Title should be empty, got %q", result.Title)
+	}
+	if result.Agent != "" {
+		t.Errorf("Agent should be empty, got %q", result.Agent)
+	}
+}
+
+func TestMapToProjectSnapshot_AllFields(t *testing.T) {
+	data := sqlite.ProjectData{
+		ExternalProjectID: "proj-1",
+		Title:             "My Project",
+		Worktree:          "/path/to/repo",
+	}
+	result := MapToProjectSnapshot(data)
+
+	if result.ExternalProjectID != "proj-1" {
+		t.Errorf("ExternalProjectID = %q, want %q", result.ExternalProjectID, "proj-1")
+	}
+	if result.Title != "My Project" {
+		t.Errorf("Title = %q, want %q", result.Title, "My Project")
+	}
+	if result.Worktree != "/path/to/repo" {
+		t.Errorf("Worktree = %q, want %q", result.Worktree, "/path/to/repo")
+	}
+}
+
+func TestMapToProjectSnapshot_EmptyFields(t *testing.T) {
+	data := sqlite.ProjectData{
+		ExternalProjectID: "proj-min",
+	}
+	result := MapToProjectSnapshot(data)
+
+	if result.ExternalProjectID != "proj-min" {
+		t.Errorf("ExternalProjectID = %q, want %q", result.ExternalProjectID, "proj-min")
+	}
+	if result.Title != "" {
+		t.Errorf("Title should be empty, got %q", result.Title)
+	}
+	if result.Worktree != "" {
+		t.Errorf("Worktree should be empty, got %q", result.Worktree)
+	}
+}
+
+func TestMapToProjectDirectorySnapshot(t *testing.T) {
+	data := sqlite.ProjectDirectoryData{
+		ExternalProjectID: "proj-1",
+		Path:              "/src/app",
+	}
+	result := MapToProjectDirectorySnapshot(data)
+
+	if result.ExternalProjectID != "proj-1" {
+		t.Errorf("ExternalProjectID = %q, want %q", result.ExternalProjectID, "proj-1")
+	}
+	if result.Path != "/src/app" {
+		t.Errorf("Path = %q, want %q", result.Path, "/src/app")
+	}
+}
+
+func TestMapToTodoSnapshot(t *testing.T) {
+	data := sqlite.TodoData{
+		ExternalSessionID: "sess-1",
+		Description:       "Fix login bug",
+		Status:            "completed",
+	}
+	result := MapToTodoSnapshot(data)
+
+	if result.ExternalSessionID != "sess-1" {
+		t.Errorf("ExternalSessionID = %q, want %q", result.ExternalSessionID, "sess-1")
+	}
+	if result.Description != "Fix login bug" {
+		t.Errorf("Description = %q, want %q", result.Description, "Fix login bug")
+	}
+	if result.Status != "completed" {
+		t.Errorf("Status = %q, want %q", result.Status, "completed")
+	}
+}
+
+func TestMapToTodoSnapshot_EmptyStatus(t *testing.T) {
+	data := sqlite.TodoData{
+		ExternalSessionID: "sess-1",
+		Description:       "Review PR",
+	}
+	result := MapToTodoSnapshot(data)
+
+	if result.Status != "" {
+		t.Errorf("Status should be empty, got %q", result.Status)
+	}
+}
+
+func TestIngestRequest_JSONSerialization_WithProjections(t *testing.T) {
+	cost := "0.0035"
+	req := IngestRequest{
+		SchemaVersion:    "1.1",
+		CollectorVersion: "0.1.0",
+		ClientHostname:   "test-host",
+		SourceDatabaseID: "db-1",
+		Records: []IngestRecord{
+			{
+				SourceRecordID:   "rec-1",
+				SessionID:        "sess-1",
+				Model:            "gpt-4",
+				Provider:         "openai",
+				ReportedAt:       "2025-01-01T00:00:00Z",
+				EstimatedCostUSD: &cost,
+			},
+		},
+		SessionContexts: []SessionContext{
+			{
+				ExternalSessionID: "sess-1",
+				Title:             "Test Session",
+				Agent:             "claude",
+				ProjectID:         "proj-1",
+			},
+		},
+		ProjectSnapshots: []ProjectSnapshot{
+			{
+				ExternalProjectID: "proj-1",
+				Title:             "Test Project",
+				Worktree:          "/tmp/test",
+			},
+		},
+		ProjectDirectorySnapshots: []ProjectDirectorySnapshot{
+			{
+				ExternalProjectID: "proj-1",
+				Path:              "/tmp/test/src",
+			},
+		},
+		TodoSnapshots: []TodoSnapshot{
+			{
+				ExternalSessionID: "sess-1",
+				Description:       "Write tests",
+				Status:            "pending",
+			},
+		},
+	}
+
+	// Marshal to JSON and back.
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+
+	var decoded IngestRequest
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+
+	if len(decoded.SessionContexts) != 1 {
+		t.Fatalf("expected 1 session context, got %d", len(decoded.SessionContexts))
+	}
+	if decoded.SessionContexts[0].ExternalSessionID != "sess-1" {
+		t.Errorf("session context mismatch")
+	}
+
+	if len(decoded.ProjectSnapshots) != 1 {
+		t.Fatalf("expected 1 project snapshot, got %d", len(decoded.ProjectSnapshots))
+	}
+	if decoded.ProjectSnapshots[0].ExternalProjectID != "proj-1" {
+		t.Errorf("project snapshot mismatch")
+	}
+
+	if len(decoded.ProjectDirectorySnapshots) != 1 {
+		t.Fatalf("expected 1 project directory snapshot, got %d", len(decoded.ProjectDirectorySnapshots))
+	}
+
+	if len(decoded.TodoSnapshots) != 1 {
+		t.Fatalf("expected 1 todo snapshot, got %d", len(decoded.TodoSnapshots))
+	}
+}
+
+func TestIngestRequest_JSONSerialization_EmptyProjections(t *testing.T) {
+	req := IngestRequest{
+		SchemaVersion:    "1.1",
+		CollectorVersion: "0.1.0",
+		ClientHostname:   "test-host",
+		SourceDatabaseID: "db-1",
+		Records:          []IngestRecord{},
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+
+	// Verify projection fields are omitted when empty.
+	raw := string(body)
+	for _, field := range []string{"session_contexts", "project_snapshots", "project_directory_snapshots", "todo_snapshots"} {
+		if strings.Contains(raw, field) {
+			t.Errorf("field %q should be omitted when empty, but found in: %s", field, raw)
+		}
+	}
+
+	var decoded IngestRequest
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if decoded.SessionContexts != nil {
+		t.Errorf("SessionContexts should be nil when absent from JSON")
+	}
+}
+

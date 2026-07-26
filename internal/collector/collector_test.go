@@ -77,8 +77,13 @@ func testConfig(baseURL string) *config.Config {
 
 // mockReader implements sqlite.Reader for testing.
 type mockReader struct {
-	records []sqlite.UsageRecord
-	err     error
+	records         []sqlite.UsageRecord
+	err             error
+	sessionCtxs     []sqlite.SessionContextData
+	projects        []sqlite.ProjectData
+	projectDirs     []sqlite.ProjectDirectoryData
+	todos           []sqlite.TodoData
+	dbInfo          sqlite.DatabaseInfo
 }
 
 func (m *mockReader) ReadRecords(since time.Time, limit int) ([]sqlite.UsageRecord, error) {
@@ -95,6 +100,26 @@ func (m *mockReader) ReadRecords(since time.Time, limit int) ([]sqlite.UsageReco
 		result = result[:limit]
 	}
 	return result, nil
+}
+
+func (m *mockReader) ReadSessionContexts(sessionIDs []string) ([]sqlite.SessionContextData, error) {
+	return m.sessionCtxs, nil
+}
+
+func (m *mockReader) ReadProjectData(projectIDs []string) ([]sqlite.ProjectData, error) {
+	return m.projects, nil
+}
+
+func (m *mockReader) ReadProjectDirectoryData(projectIDs []string) ([]sqlite.ProjectDirectoryData, error) {
+	return m.projectDirs, nil
+}
+
+func (m *mockReader) ReadTodoData(sessionIDs []string) ([]sqlite.TodoData, error) {
+	return m.todos, nil
+}
+
+func (m *mockReader) SchemaInfo() sqlite.DatabaseInfo {
+	return m.dbInfo
 }
 
 // makeRecords creates test sqlite.UsageRecord slices.
@@ -373,7 +398,7 @@ func TestCollector_SendsRecordsAndUpdatesCursor(t *testing.T) {
 	mock := &mockReader{
 		records: makeRecords([]string{"rec-1", "rec-2"}, now),
 	}
-	c.newReader = func(_ string) (sqlite.Reader, func(), error) {
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
 		return mock, func() {}, nil
 	}
 
@@ -450,7 +475,7 @@ func TestCollector_CursorNotUpdatedOnFailure(t *testing.T) {
 	mock := &mockReader{
 		records: makeRecords([]string{"rec-1", "rec-2"}, now),
 	}
-	c.newReader = func(_ string) (sqlite.Reader, func(), error) {
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
 		return mock, func() {}, nil
 	}
 
@@ -490,7 +515,7 @@ func TestCollector_ClientHostnameSetOnRequest(t *testing.T) {
 	mock := &mockReader{
 		records: makeRecords([]string{"rec-1"}, now),
 	}
-	c.newReader = func(_ string) (sqlite.Reader, func(), error) {
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
 		return mock, func() {}, nil
 	}
 
@@ -527,7 +552,7 @@ func TestCollector_UsesConfiguredBatchLimit(t *testing.T) {
 
 	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
 	mock := &mockReader{records: makeRecords([]string{"rec-1", "rec-2", "rec-3", "rec-4"}, now)}
-	c.newReader = func(_ string) (sqlite.Reader, func(), error) {
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
 		return mock, func() {}, nil
 	}
 
@@ -580,7 +605,7 @@ func TestCollector_HeartbeatSentAfterInterval(t *testing.T) {
 
 	// No records from reader.
 	mock := &mockReader{}
-	c.newReader = func(_ string) (sqlite.Reader, func(), error) {
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
 		return mock, func() {}, nil
 	}
 
@@ -625,7 +650,7 @@ func TestCollector_HeartbeatSkippedWithoutPriorSuccess(t *testing.T) {
 	// No prior success recorded.
 
 	mock := &mockReader{}
-	c.newReader = func(_ string) (sqlite.Reader, func(), error) {
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
 		return mock, func() {}, nil
 	}
 
@@ -665,7 +690,7 @@ func TestCollector_HeartbeatSkippedWhenIntervalNotElapsed(t *testing.T) {
 	c.mu.Unlock()
 
 	mock := &mockReader{}
-	c.newReader = func(_ string) (sqlite.Reader, func(), error) {
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
 		return mock, func() {}, nil
 	}
 
@@ -701,7 +726,7 @@ func TestCollector_SeedsLastSuccessFromPersistedCursor(t *testing.T) {
 	}
 
 	mock := &mockReader{}
-	c.newReader = func(_ string) (sqlite.Reader, func(), error) {
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
 		return mock, func() {}, nil
 	}
 
@@ -740,7 +765,7 @@ func TestCollector_DoesNotSeedLastSuccessWithoutCursor(t *testing.T) {
 	// No cursor is set — database has never been tracked.
 
 	mock := &mockReader{}
-	c.newReader = func(_ string) (sqlite.Reader, func(), error) {
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
 		return mock, func() {}, nil
 	}
 
@@ -782,7 +807,7 @@ func TestCollector_SeedEnablesHeartbeat(t *testing.T) {
 	}
 
 	mock := &mockReader{}
-	c.newReader = func(_ string) (sqlite.Reader, func(), error) {
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
 		return mock, func() {}, nil
 	}
 
@@ -826,7 +851,7 @@ func TestCollector_GracefulShutdown(t *testing.T) {
 	mock := &mockReader{
 		records: makeRecords([]string{"rec-1"}, time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)),
 	}
-	c.newReader = func(_ string) (sqlite.Reader, func(), error) {
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
 		return mock, func() {}, nil
 	}
 
@@ -953,5 +978,335 @@ func TestNewCollector_StoresHostname(t *testing.T) {
 	host, _ := os.Hostname()
 	if c.hostname != host {
 		t.Errorf("hostname = %q, want %q", c.hostname, host)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Projection integration
+// ---------------------------------------------------------------------------
+
+func TestCollector_IncludesProjectionsInRequest(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	srv, lastReq := gatewayServer(http.StatusCreated, gateway.IngestResponse{
+		BatchID:       "batch-proj-001",
+		AcceptedCount: 2,
+	})
+
+	cfg := testConfig(srv.URL)
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+
+	c, err := NewCollector(cfg, "0.1.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2"}, now),
+		sessionCtxs: []sqlite.SessionContextData{
+			{ExternalSessionID: "sess-rec-1", Agent: "claude", ProjectID: "proj-1", Model: "gpt-4"},
+			{ExternalSessionID: "sess-rec-2", Agent: "gpt", ProjectID: "proj-1", Model: "gpt-4o"},
+		},
+		projects: []sqlite.ProjectData{
+			{ExternalProjectID: "proj-1", Title: "Test Project", Worktree: "/tmp/test"},
+		},
+		projectDirs: []sqlite.ProjectDirectoryData{
+			{ExternalProjectID: "proj-1", Path: "/tmp/test/src"},
+		},
+		todos: []sqlite.TodoData{
+			{ExternalSessionID: "sess-rec-1", Description: "Write tests", Status: "pending"},
+			{ExternalSessionID: "sess-rec-1", Description: "Review PR", Status: "completed"},
+		},
+	}
+
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+	if len(dbs) != 1 {
+		t.Fatalf("expected 1 DB, got %d", len(dbs))
+	}
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	req, ok := lastReq.Load().(gateway.IngestRequest)
+	if !ok {
+		t.Fatal("no request received by gateway")
+	}
+
+	// Verify records are still present.
+	if len(req.Records) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(req.Records))
+	}
+
+	// Verify session contexts: 2 unique sessions, 1 per distinct ID.
+	if len(req.SessionContexts) != 2 {
+		t.Fatalf("expected 2 session contexts, got %d", len(req.SessionContexts))
+	}
+	foundSess1 := false
+	foundSess2 := false
+	for _, sc := range req.SessionContexts {
+		if sc.ExternalSessionID == "sess-rec-1" {
+			foundSess1 = true
+			if sc.Agent != "claude" {
+				t.Errorf("session 1 agent = %q, want %q", sc.Agent, "claude")
+			}
+		}
+		if sc.ExternalSessionID == "sess-rec-2" {
+			foundSess2 = true
+		}
+	}
+	if !foundSess1 {
+		t.Error("session context for sess-rec-1 missing")
+	}
+	if !foundSess2 {
+		t.Error("session context for sess-rec-2 missing")
+	}
+
+	// Verify project snapshots: 1 unique project.
+	if len(req.ProjectSnapshots) != 1 {
+		t.Fatalf("expected 1 project snapshot, got %d", len(req.ProjectSnapshots))
+	}
+	if req.ProjectSnapshots[0].ExternalProjectID != "proj-1" {
+		t.Errorf("project id = %q, want %q", req.ProjectSnapshots[0].ExternalProjectID, "proj-1")
+	}
+	if req.ProjectSnapshots[0].Title != "Test Project" {
+		t.Errorf("project title = %q, want %q", req.ProjectSnapshots[0].Title, "Test Project")
+	}
+
+	// Verify project directory snapshots.
+	if len(req.ProjectDirectorySnapshots) != 1 {
+		t.Fatalf("expected 1 project directory snapshot, got %d", len(req.ProjectDirectorySnapshots))
+	}
+
+	// Verify todo snapshots: 2 items.
+	if len(req.TodoSnapshots) != 2 {
+		t.Fatalf("expected 2 todo snapshots, got %d", len(req.TodoSnapshots))
+	}
+}
+
+func TestCollector_DedupSessionContextsWithinBatch(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	srv, lastReq := gatewayServer(http.StatusCreated, gateway.IngestResponse{
+		BatchID:       "batch-dedup-001",
+		AcceptedCount: 3,
+	})
+
+	cfg := testConfig(srv.URL)
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+
+	c, err := NewCollector(cfg, "0.1.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	// Three records from same session.
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2", "rec-3"}, now),
+		// Mock returns duplicate session contexts — dedup in collector.
+		sessionCtxs: []sqlite.SessionContextData{
+			{ExternalSessionID: "sess-rec-1", Agent: "claude"},
+			{ExternalSessionID: "sess-rec-2", Agent: "claude"},
+			{ExternalSessionID: "sess-rec-3", Agent: "claude"},
+		},
+	}
+
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, _ := c.resolveDatabases()
+	c.processDatabase(context.Background(), dbs[0])
+
+	req, ok := lastReq.Load().(gateway.IngestRequest)
+	if !ok {
+		t.Fatal("no request received")
+	}
+
+	// The makeRecords helper creates records with session IDs sess-rec-1,
+	// sess-rec-2, sess-rec-3. uniqueSessionIDs extracts unique IDs, and
+	// dedupSessionContexts further de-duplicates by ExternalSessionID.
+	// All 3 mock session contexts have different IDs, so we expect 3 items.
+	if len(req.SessionContexts) != 3 {
+		t.Errorf("expected 3 distinct session contexts, got %d", len(req.SessionContexts))
+	}
+}
+
+func TestCollector_DedupProjectDirectoriesWithinBatch(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	srv, lastReq := gatewayServer(http.StatusCreated, gateway.IngestResponse{
+		BatchID:       "batch-dedup-dir-001",
+		AcceptedCount: 2,
+	})
+
+	cfg := testConfig(srv.URL)
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+
+	c, err := NewCollector(cfg, "0.1.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2"}, now),
+		// Two directories for the same project.
+		projectDirs: []sqlite.ProjectDirectoryData{
+			{ExternalProjectID: "proj-1", Path: "/tmp/test/src"},
+			{ExternalProjectID: "proj-1", Path: "/tmp/test/lib"},
+		},
+		sessionCtxs: []sqlite.SessionContextData{
+			{ExternalSessionID: "sess-rec-1", ProjectID: "proj-1"},
+			{ExternalSessionID: "sess-rec-2", ProjectID: "proj-1"},
+		},
+		projects: []sqlite.ProjectData{
+			{ExternalProjectID: "proj-1", Title: "Test", Worktree: "/tmp/test"},
+		},
+	}
+
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, _ := c.resolveDatabases()
+	c.processDatabase(context.Background(), dbs[0])
+
+	req, ok := lastReq.Load().(gateway.IngestRequest)
+	if !ok {
+		t.Fatal("no request received")
+	}
+
+	// Both directories should be present — composite key dedup preserves them.
+	if len(req.ProjectDirectorySnapshots) != 2 {
+		t.Fatalf("expected 2 project directory snapshots (2 unique paths), got %d", len(req.ProjectDirectorySnapshots))
+	}
+
+	// Verify both paths are individually present.
+	seenSrc := false
+	seenLib := false
+	for _, pd := range req.ProjectDirectorySnapshots {
+		if pd.ExternalProjectID == "proj-1" && pd.Path == "/tmp/test/src" {
+			seenSrc = true
+		}
+		if pd.ExternalProjectID == "proj-1" && pd.Path == "/tmp/test/lib" {
+			seenLib = true
+		}
+	}
+	if !seenSrc {
+		t.Error("project directory snapshot for /tmp/test/src missing")
+	}
+	if !seenLib {
+		t.Error("project directory snapshot for /tmp/test/lib missing")
+	}
+}
+
+func TestCollector_CursorUnchangedWithProjections(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	srv, _ := gatewayServer(http.StatusCreated, gateway.IngestResponse{
+		BatchID:       "batch-cursor-001",
+		AcceptedCount: 1,
+	})
+
+	cfg := testConfig(srv.URL)
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+
+	c, err := NewCollector(cfg, "0.1.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1"}, now),
+		sessionCtxs: []sqlite.SessionContextData{
+			{ExternalSessionID: "sess-rec-1", Agent: "claude"},
+		},
+	}
+
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, _ := c.resolveDatabases()
+	c.processDatabase(context.Background(), dbs[0])
+
+	// Verify cursor was updated to record timestamp (projections don't affect cursor).
+	cursor, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	expectedCursor := now // rec-1 has +0s offset
+	if !cursor.Equal(expectedCursor) {
+		t.Errorf("cursor = %v, want %v", cursor, expectedCursor)
+	}
+}
+
+func TestCollector_EmptyProjectionsWhenNoRecords(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	srv, lastReq := gatewayServer(http.StatusCreated, gateway.IngestResponse{
+		BatchID:       "hb-no-proj",
+		AcceptedCount: 0,
+	})
+
+	cfg := testConfig(srv.URL)
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.HeartbeatInterval = 10 * time.Millisecond
+
+	c, err := NewCollector(cfg, "0.1.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	// Record prior success so heartbeat fires.
+	c.mu.Lock()
+	c.lastSuccess[dbPath] = time.Now().Add(-100 * time.Millisecond)
+	c.mu.Unlock()
+
+	// No records — heartbeat.
+	mock := &mockReader{}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, _ := c.resolveDatabases()
+	c.processDatabase(context.Background(), dbs[0])
+
+	req, ok := lastReq.Load().(gateway.IngestRequest)
+	if !ok {
+		t.Fatal("no heartbeat request received")
+	}
+
+	// Heartbeat has no projections.
+	if len(req.SessionContexts) != 0 {
+		t.Errorf("heartbeat should have 0 session contexts, got %d", len(req.SessionContexts))
+	}
+	if len(req.ProjectSnapshots) != 0 {
+		t.Errorf("heartbeat should have 0 project snapshots, got %d", len(req.ProjectSnapshots))
+	}
+	if len(req.ProjectDirectorySnapshots) != 0 {
+		t.Errorf("heartbeat should have 0 project directory snapshots, got %d", len(req.ProjectDirectorySnapshots))
+	}
+	if len(req.TodoSnapshots) != 0 {
+		t.Errorf("heartbeat should have 0 todo snapshots, got %d", len(req.TodoSnapshots))
 	}
 }

@@ -92,13 +92,29 @@ func OpenAndInspect(path string) (*DatabaseInfo, error) {
 		return nil, fmt.Errorf("reading schema version: %w", err)
 	}
 
+	// Detect optional tables — these may or may not exist and their absence
+	// does not prevent the database from being processed.
+	hasProject, projectCols := detectOptionalTable(db, "project")
+	hasProjectDir, projectDirCols := detectOptionalTable(db, "project_directory")
+	hasTodo, todoCols := detectOptionalTable(db, "todo")
+
+	// Detect session columns for schema-aware projection reading.
+	_, sessionCols := detectOptionalTable(db, "session")
+
 	return &DatabaseInfo{
-		Path:          absPath,
-		Size:          fileInfo.Size(),
-		LastModified:  fileInfo.ModTime(),
-		MessageCount:  msgCount,
-		SessionCount:  sessCount,
-		SchemaVersion: schemaVer,
+		Path:                     absPath,
+		Size:                     fileInfo.Size(),
+		LastModified:             fileInfo.ModTime(),
+		MessageCount:             msgCount,
+		SessionCount:             sessCount,
+		SchemaVersion:            schemaVer,
+		HasProjectTable:          hasProject,
+		HasProjectDirectoryTable: hasProjectDir,
+		HasTodoTable:             hasTodo,
+		ProjectColumns:           projectCols,
+		ProjectDirectoryColumns:  projectDirCols,
+		TodoColumns:              todoCols,
+		SessionColumns:           sessionCols,
 	}, nil
 }
 
@@ -142,5 +158,52 @@ func getSchemaVersion(db *sql.DB) (string, error) {
 		return "", err
 	}
 	return strconv.Itoa(version), nil
+}
+
+// detectOptionalTable checks whether the named table exists in the database
+// and returns its column names. If the table does not exist, it returns
+// (false, nil) without an error — optional tables are handled gracefully.
+func detectOptionalTable(db *sql.DB, name string) (bool, []string) {
+	// Validate table name to prevent SQL injection in PRAGMA table_info.
+	allowedTables := map[string]bool{
+		"project":           true,
+		"project_directory": true,
+		"todo":              true,
+		"session":           true,
+	}
+	if !allowedTables[name] {
+		return false, nil
+	}
+
+	var count int
+	if err := db.QueryRow(
+		"SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
+		name,
+	).Scan(&count); err != nil {
+		return false, nil
+	}
+	if count == 0 {
+		return false, nil
+	}
+
+	// Table exists — discover its columns via PRAGMA table_info.
+	rows, err := db.Query("PRAGMA table_info(" + name + ")")
+	if err != nil {
+		return true, nil // table exists but we couldn't read columns
+	}
+	defer rows.Close()
+
+	var columns []string
+	for rows.Next() {
+		var cid, notnull int
+		var colName, colType string
+		var dfltValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &colName, &colType, &notnull, &dfltValue, &pk); err != nil {
+			continue
+		}
+		columns = append(columns, colName)
+	}
+	return true, columns
 }
 
