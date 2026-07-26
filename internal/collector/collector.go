@@ -142,6 +142,27 @@ func (c *Collector) iterate(ctx context.Context) {
 		return
 	}
 
+	// Seed lastSuccess for databases with persisted cursors so that
+	// heartbeats work immediately after restart for databases that
+	// were previously tracked.
+	for _, db := range dbs {
+		cursor, err := c.tracker.GetCursor(db.path)
+		if err != nil {
+			c.logger.Warn("failed to get cursor for lastSuccess seeding",
+				"path", db.path,
+				"error", err,
+			)
+			continue
+		}
+		if !cursor.IsZero() {
+			c.mu.Lock()
+			if _, exists := c.lastSuccess[db.path]; !exists {
+				c.lastSuccess[db.path] = time.Now()
+			}
+			c.mu.Unlock()
+		}
+	}
+
 	for _, db := range dbs {
 		// Respect context cancellation between databases.
 		if err := ctx.Err(); err != nil {
