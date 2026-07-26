@@ -41,6 +41,7 @@ type Collector struct {
 	mu          sync.Mutex
 	lastSuccess map[string]time.Time // keyed by source database path
 	batchLimit  int
+	seedOnce    sync.Once
 
 	newReader readerFactory
 }
@@ -141,6 +142,36 @@ func (c *Collector) iterate(ctx context.Context) {
 		c.logger.Debug("no source databases found")
 		return
 	}
+
+	// Seed lastSuccess for databases with persisted cursors so that
+	// heartbeats work immediately after restart for databases that
+	// were previously tracked. This runs exactly once at startup to
+	// avoid redundant GetCursor calls on every poll cycle.
+	c.seedOnce.Do(func() {
+		for _, db := range dbs {
+			cursor, err := c.tracker.GetCursor(db.path)
+			if err != nil {
+				c.logger.Warn("failed to get cursor for lastSuccess seeding",
+					"path", db.path,
+					"error", err,
+				)
+				continue
+			}
+			if !cursor.IsZero() {
+				c.mu.Lock()
+				if _, exists := c.lastSuccess[db.path]; !exists {
+					// Use time.Now() rather than the cursor timestamp because
+					// "last success" represents when the collector last sent
+					// data. On restart the most recent successful data send
+					// was just now (the collector started successfully).
+					// Using the cursor timestamp would make the heartbeat
+					// interval immediately expire, causing a heartbeat burst.
+					c.lastSuccess[db.path] = time.Now()
+				}
+				c.mu.Unlock()
+			}
+		}
+	})
 
 	for _, db := range dbs {
 		// Respect context cancellation between databases.
