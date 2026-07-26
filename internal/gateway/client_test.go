@@ -335,6 +335,12 @@ func TestMapToIngestRecord_WithCost(t *testing.T) {
 		Model:            "gpt-4",
 		ProviderID:       "openai",
 		Mode:             "chat",
+		Agent:            "code-editor",
+		ProjectID:        "proj-1",
+		WorkspaceID:      "ws-1",
+		ParentSessionID:  "parent-sess-1",
+		ReasoningTokens:  30,
+		FinishReason:     "stop",
 		InputTokens:      100,
 		OutputTokens:     50,
 		TokensCacheRead:  10,
@@ -360,12 +366,39 @@ func TestMapToIngestRecord_WithCost(t *testing.T) {
 	if result.Mode != "chat" {
 		t.Errorf("Mode = %q, want %q", result.Mode, "chat")
 	}
+	// Enrichment fields.
+	if result.Agent != "code-editor" {
+		t.Errorf("Agent = %q, want %q", result.Agent, "code-editor")
+	}
+	if result.ProjectID != "proj-1" {
+		t.Errorf("ProjectID = %q, want %q", result.ProjectID, "proj-1")
+	}
+	if result.WorkspaceID != "ws-1" {
+		t.Errorf("WorkspaceID = %q, want %q", result.WorkspaceID, "ws-1")
+	}
+	if result.ParentSessionID != "parent-sess-1" {
+		t.Errorf("ParentSessionID = %q, want %q", result.ParentSessionID, "parent-sess-1")
+	}
+	if result.ReasoningTokens != 30 {
+		t.Errorf("ReasoningTokens = %d, want %d", result.ReasoningTokens, 30)
+	}
+	if result.FinishReason != "stop" {
+		t.Errorf("FinishReason = %q, want %q", result.FinishReason, "stop")
+	}
+	// Cache split fields.
+	if result.CacheReadTokens != 10 {
+		t.Errorf("CacheReadTokens = %d, want %d", result.CacheReadTokens, 10)
+	}
+	if result.CacheWriteTokens != 5 {
+		t.Errorf("CacheWriteTokens = %d, want %d", result.CacheWriteTokens, 5)
+	}
 	if result.InputTokens != 100 {
 		t.Errorf("InputTokens = %d, want %d", result.InputTokens, 100)
 	}
 	if result.OutputTokens != 50 {
 		t.Errorf("OutputTokens = %d, want %d", result.OutputTokens, 50)
 	}
+	// Backward-compatible CachedTokens sum.
 	if result.CachedTokens != 15 {
 		t.Errorf("CachedTokens = %d, want %d", result.CachedTokens, 15)
 	}
@@ -386,6 +419,12 @@ func TestMapToIngestRecord_ZeroCost(t *testing.T) {
 		SourceRecordID:   "rec-2",
 		SessionID:        "sess-2",
 		Model:            "gpt-3.5-turbo",
+		Agent:            "cli-agent",
+		ProjectID:        "proj-2",
+		WorkspaceID:      "ws-2",
+		ParentSessionID:  "parent-2",
+		ReasoningTokens:  0,
+		FinishReason:     "length",
 		InputTokens:      200,
 		OutputTokens:     100,
 		TokensCacheRead:  0,
@@ -399,8 +438,34 @@ func TestMapToIngestRecord_ZeroCost(t *testing.T) {
 	if result.EstimatedCostUSD != nil {
 		t.Errorf("ExpectedCostUSD = %q, want nil for zero cost", *result.EstimatedCostUSD)
 	}
+	// Cache split fields: zero both ways.
+	if result.CacheReadTokens != 0 {
+		t.Errorf("CacheReadTokens = %d, want 0", result.CacheReadTokens)
+	}
+	if result.CacheWriteTokens != 0 {
+		t.Errorf("CacheWriteTokens = %d, want 0", result.CacheWriteTokens)
+	}
 	if result.CachedTokens != 0 {
 		t.Errorf("CachedTokens = %d, want 0", result.CachedTokens)
+	}
+	// Enrichment fields.
+	if result.Agent != "cli-agent" {
+		t.Errorf("Agent = %q, want %q", result.Agent, "cli-agent")
+	}
+	if result.ProjectID != "proj-2" {
+		t.Errorf("ProjectID = %q, want %q", result.ProjectID, "proj-2")
+	}
+	if result.WorkspaceID != "ws-2" {
+		t.Errorf("WorkspaceID = %q, want %q", result.WorkspaceID, "ws-2")
+	}
+	if result.ParentSessionID != "parent-2" {
+		t.Errorf("ParentSessionID = %q, want %q", result.ParentSessionID, "parent-2")
+	}
+	if result.ReasoningTokens != 0 {
+		t.Errorf("ReasoningTokens = %d, want 0", result.ReasoningTokens)
+	}
+	if result.FinishReason != "length" {
+		t.Errorf("FinishReason = %q, want %q", result.FinishReason, "length")
 	}
 }
 
@@ -415,6 +480,12 @@ func TestMapToIngestRecord_OnlyCacheRead(t *testing.T) {
 	if result.CachedTokens != 50 {
 		t.Errorf("CachedTokens = %d, want 50", result.CachedTokens)
 	}
+	if result.CacheReadTokens != 50 {
+		t.Errorf("CacheReadTokens = %d, want 50", result.CacheReadTokens)
+	}
+	if result.CacheWriteTokens != 0 {
+		t.Errorf("CacheWriteTokens = %d, want 0", result.CacheWriteTokens)
+	}
 }
 
 func TestMapToIngestRecord_OnlyCacheWrite(t *testing.T) {
@@ -428,10 +499,18 @@ func TestMapToIngestRecord_OnlyCacheWrite(t *testing.T) {
 	if result.CachedTokens != 25 {
 		t.Errorf("CachedTokens = %d, want 25", result.CachedTokens)
 	}
+	if result.CacheReadTokens != 0 {
+		t.Errorf("CacheReadTokens = %d, want 0", result.CacheReadTokens)
+	}
+	if result.CacheWriteTokens != 25 {
+		t.Errorf("CacheWriteTokens = %d, want 25", result.CacheWriteTokens)
+	}
 }
 
 func TestMapToIngestRecord_LargeCost(t *testing.T) {
 	record := UsageRecord{
+		TokensCacheRead:  7,
+		TokensCacheWrite: 3,
 		EstimatedCostUSD: 1234.56789,
 		OccurredAt:       time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
@@ -441,6 +520,15 @@ func TestMapToIngestRecord_LargeCost(t *testing.T) {
 	}
 	if *result.EstimatedCostUSD != "1234.56789" {
 		t.Errorf("EstimatedCostUSD = %q, want %q", *result.EstimatedCostUSD, "1234.56789")
+	}
+	if result.CacheReadTokens != 7 {
+		t.Errorf("CacheReadTokens = %d, want 7", result.CacheReadTokens)
+	}
+	if result.CacheWriteTokens != 3 {
+		t.Errorf("CacheWriteTokens = %d, want 3", result.CacheWriteTokens)
+	}
+	if result.CachedTokens != 10 {
+		t.Errorf("CachedTokens = %d, want 10", result.CachedTokens)
 	}
 }
 
