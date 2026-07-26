@@ -24,7 +24,7 @@
 
 **Client Hostname** — The machine hostname (`os.Hostname()`) attached to each usage record for operational visibility. Resolved once at collector startup. Distinguished from `client_id` which is a stable instance identifier used in the idempotency key tuple. Allows operators to identify which machine generated a record without relying on IP addresses.
 
-**Collector Token** — A pre-provisioned bearer token used by the collector to authenticate to the Gateway. SHA-256 hashed server-side. Provisioned via the Gateway's `/admin/clients/{id}/tokens` endpoint.
+**Collector Token** — A pre-provisioned bearer token used by the collector to authenticate to the Gateway. SHA-256 hashed server-side. Must pass the Gateway's **Two-Layer Auth**: (1) match `GATEWAY_API_KEY` in the `ApiKeyMiddleware`, and (2) have its hash registered in the Gateway's `collector_credentials` table (see Gateway ADR-0007). Provisioned via the Gateway's `/admin/clients/{id}/tokens` endpoint, or bootstrapped by registering the Admin API Key's hash directly.
 
 **Idempotency Key** — The tuple `(client_id, source_database_id, source_record_id)` that uniquely identifies a usage record. The Gateway applies first-write-wins semantics to prevent duplicates.
 
