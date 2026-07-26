@@ -1,23 +1,34 @@
 ## Diff Review
 
 ### Summary
-Adds a new `.goreleaser.yaml` configuration file defining a cross-platform build matrix for the `opencode-collector` binary. The configuration targets **linux/amd64** (production), **darwin/amd64**, **darwin/arm64**, and **windows/amd64**, with CGO disabled, stripped debug symbols (`-s -w`), archive wrapping, checksum generation, and changelog filtering.
+Consolidated merge of four issues (#20, #21, #22, #23) that enrich the collector's usage pipeline with session-level metadata (agent, project ID, workspace ID, parent session ID), reasoning tokens, finish reason, and split cache token fields. The change spans 8 files (553 insertions, 12 deletions):
+
+- **Issue #20**: Adds `Agent`, `ProjectID`, `WorkspaceID`, `ParentSessionID`, `ReasoningTokens`, `FinishReason` to `gateway.UsageRecord` and `gateway.IngestRecord` DTOs; splits `CacheReadTokens`/`CacheWriteTokens` in `IngestRecord`.
+- **Issue #21**: Maps new fields in `collector.toGatewayUsageRecord()`; switches `sendRecords()` to use `gateway.SchemaVersion` constant.
+- **Issue #22**: Updates `client.MapToIngestRecord()` for all new fields + cache split; defines `SchemaVersion = "1.2"`; updates heartbeat to use constant.
+- **Issue #23**: Adds end-to-end integration test (`internal/gateway/integration_test.go`); updates all existing unit tests for coverage of new fields.
 
 ### Contract Compliance
-No task contract file was found at `.status/handoff/task-contract-issue-11.yaml`. Full git diff was reviewed instead.
+No task-contract files were found in `.status/handoff/`. Per-issue review artifacts (`diff-review-issue-*.md`) were also absent, so per-issue findings cannot be referenced or distinguished from cross-issue concerns.
 
 ### Issues
+
 | Severity | File | Issue |
 |----------|------|-------|
-| Suggestion | `.goreleaser.yaml` | Archive format is `tar.gz` for all OSes. Windows users conventionally expect `.zip`. Consider conditional format: `zip` for Windows, `tar.gz` for Unix. Not blocking — `tar.gz` works everywhere. |
-| Suggestion | `.goreleaser.yaml` | No `release` section is defined, so GoReleaser defaults to GitHub Releases. If the project targets a different release destination (e.g., GitLab Releases, S3), this will need to be added. |
+| minor | `internal/gateway/client.go:22` | Schema version jumps from hardcoded `"1.0"` to `"1.2"`, skipping `"1.1"`. If there is no external reason for the skip, this may cause confusion. Confirm the version numbering scheme is intentional. |
+| minor | `internal/gateway/integration_test.go:84-122` | `sqliteToGatewayUsageRecord()` duplicates the mapping logic from `collector.toGatewayUsageRecord()`. The comment explains this avoids a circular import, but the two functions will drift over time. Consider extracting the mapping into a shared helper in the `gateway` package that both the collector and tests can use. |
+| info | `internal/gateway/types.go:16` vs `types.go:14` | `UsageRecord.ProviderID` uses `json:"providerId"` (camelCase) while new enrichment fields use snake_case (`project_id`, `workspace_id`, etc.). Pre-existing inconsistency — the wire format (`IngestRecord`) is consistently snake_case, so this only affects internal serialization. Not blocking. |
+| info | various | `IngestRecord` now carries `CacheReadTokens`, `CacheWriteTokens`, AND backward-compatible `CachedTokens` (sum). Triple data is fine during migration, but a future cleanup issue should track removing `CachedTokens` once the Gateway has migrated to the split fields. |
+| info | `internal/gateway/integration_test.go` | Integration test is thorough — covers enriched pipeline, zero-cost records, and all field combinations. All 395 lines are well-structured with no redundancy. |
+| info | (repo root) | No CI workflow files exist in `.github/workflows/`. Commit `e2579c5` mentions "verify CI workflow" but CI config changes are either absent or not part of this branch. Existing `go test ./...` coverage is sufficient. |
 
 ### Verdict
 **Approve with comments**
 
 ### Notes
-- **Build config is correct**: `main: ./cmd/opencode-collector` matches project structure, `CGO_ENABLED=0` enables safe cross-compilation, ldflags match the existing `Makefile`, and the ignore list produces the intended 4-OS/arch matrix.
-- **No breaking changes**: The existing `Makefile` (local builds), `Dockerfile` (container builds), and all source code are untouched.
-- **No security concerns**: No secrets, credentials, or injection vectors. `-s -w` stripping is standard for release binaries.
-- **No test changes needed**: This is declarative YAML configuration — no code changes, no test implications.
-- **Minor archive format concern**: Windows builds packaged as `.tar.gz` instead of `.zip` is slightly unconventional but not a functional issue. Users can extract with 7-Zip, WinRAR, WSL `tar`, or similar tools.
+- **Build & Vet**: `go build ./...` and `go vet ./...` pass cleanly.
+- **All tests pass**: `go test ./...` across all 10 packages — including the new integration tests.
+- **Backward compatibility**: `CachedTokens` is preserved as a sum; `EstimatedCostUSD` nil-handling unchanged; no existing fields are removed or renamed.
+- **Security**: No secrets, tokens, or injection vectors introduced. No new external dependencies.
+- **Cross-issue integration**: The four issues compose cleanly — no merge conflicts, no duplicated field definitions, no inconsistent naming across layers. The schema version constant is consistently used across collector, heartbeat, and gateway packages.
+- **Drift risk**: The duplicated `sqliteToGatewayUsageRecord()` in the integration test is the only notable maintenance concern. Recommend extracting a shared helper in a follow-up PR.
