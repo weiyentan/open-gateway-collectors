@@ -247,12 +247,12 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 func (c *Collector) sendRecords(ctx context.Context, db dbIdentity, records []sqlite.UsageRecord, logger *slog.Logger) {
 	ingestRecords := make([]gateway.IngestRecord, 0, len(records))
 	for i := range records {
-		gwRec := toGatewayUsageRecord(records[i])
+		gwRec := ToGatewayUsageRecord(records[i])
 		ingestRecords = append(ingestRecords, gateway.MapToIngestRecord(gwRec))
 	}
 
 	req := &gateway.IngestRequest{
-		SchemaVersion:    "1.0",
+		SchemaVersion:    gateway.SchemaVersion,
 		CollectorVersion: c.version,
 		SourceDatabaseID: db.id,
 		Records:          ingestRecords,
@@ -328,15 +328,21 @@ func (c *Collector) maybeSendHeartbeat(ctx context.Context, db dbIdentity, logge
 	logger.Info("heartbeat sent", "batch_id", resp.BatchID)
 }
 
-// toGatewayUsageRecord converts a sqlite.UsageRecord to the gateway
+// ToGatewayUsageRecord converts a sqlite.UsageRecord to the gateway
 // package's UsageRecord type for use with MapToIngestRecord.
-func toGatewayUsageRecord(rec sqlite.UsageRecord) gateway.UsageRecord {
+func ToGatewayUsageRecord(rec sqlite.UsageRecord) gateway.UsageRecord {
 	return gateway.UsageRecord{
 		SourceRecordID:   rec.SourceRecordID,
 		SessionID:        rec.SourceSessionID,
 		Model:            rec.ModelID,
 		ProviderID:       rec.ProviderID,
 		Mode:             rec.Mode,
+		Agent:            rec.Agent,
+		ProjectID:        rec.SourceProjectID,
+		WorkspaceID:      rec.WorkspaceID,
+		ParentSessionID:  rec.ParentSessionID,
+		ReasoningTokens:  rec.TokensReasoning,
+		FinishReason:     rec.FinishReason,
 		InputTokens:      rec.TokensInput,
 		OutputTokens:     rec.TokensOutput,
 		TokensCacheRead:  rec.TokensCacheRead,
