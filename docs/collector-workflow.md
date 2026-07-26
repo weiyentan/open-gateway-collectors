@@ -77,11 +77,12 @@ Each push cycle (one `iterate()` call) runs every **Poll Interval** (default: 60
 
 1. **Database Discovery** — The collector scans the configured SQLite directory (or uses a single explicit path) for `*.db` files. The default directory is platform-specific (`~/.local/share/opencode/` on Linux, `%APPDATA%/OpenCode/` on Windows). This scan is performed every cycle, so newly created databases are picked up automatically.
 
-2. **Open and Inspect** — Each candidate file is opened in read-only mode and validated:
-   - Checks that the file is a valid SQLite database.
-   - Verifies the `message` and `session` tables exist.
-   - Reads row counts and schema version metadata.
-   - Files that fail inspection are skipped with a warning — they do not halt the cycle.
+ 2. **Open and Inspect** — Each candidate file is opened in read-only mode and validated:
+    - Checks that the file is a valid SQLite database.
+    - Verifies the `message` and `session` tables exist.
+    - Reads row counts and schema version metadata.
+    - **Detects optional tables** (`project`, `project_directory`, `todo`) and their column names for schema-aware projection reading.
+    - Files that fail inspection are skipped with a warning — they do not halt the cycle.
 
 3. **Identity Resolution** — For each valid Source Database, `GetOrCreateIdentity` assigns a stable UUID v4. The UUID is persisted on disk under `.collector-id/` (keyed by a SHA-256 hash of the absolute database path) so the same database gets the same identity across collector restarts.
 
@@ -89,25 +90,33 @@ Each push cycle (one `iterate()` call) runs every **Poll Interval** (default: 60
 
 4. **Cursor Lookup** — The collector retrieves the last-sent `OccurredAt` timestamp for the database from the state tracker (`.collector-state` file). On a first-ever run, this returns a zero time, meaning all records will be backfilled.
 
-5. **Read Records** — The SQLite reader runs a prepared query joining `message` and `session` tables, filtering for `message.time_updated > cursor` and only assistant messages that contain `tokens.input` in their `JSON` data blob. Records are returned sorted by `time_updated` ascending, limited to the batch limit (default: 500).
+ 5. **Read Records** — The SQLite reader runs a prepared query joining `message` and `session` tables, filtering for `message.time_updated > cursor` and only assistant messages that contain `tokens.input` in their `JSON` data blob. Records are returned sorted by `time_updated` ascending, limited to the batch limit (default: 500).
+
+ 6. **Read Projections** — After reading usage records, the collector extracts unique session IDs and project IDs from the records and reads batch-level projection snapshots:
+    - **Session Contexts** — Descriptive metadata (title, agent, project ID, parent session, workspace, model) from the `session` table for each distinct session ID.
+    - **Project Snapshots** — Project metadata (title, worktree path) from the optional `project` table.
+    - **Project Directory Snapshots** — Directory mappings from the optional `project_directory` table.
+    - **Todo Snapshots** — Todo items (description, status) from the optional `todo` table.
+    
+    Missing or absent tables are handled gracefully — the reader returns empty slices without error. Projections are de-duplicated by ID within the batch before inclusion in the ingest payload.
 
 ### Phase 3: Ingestion
 
-6. **Batch Construction** — Each raw record is mapped to the canonical wire format defined by the Gateway's `/ingest` schema: `source_record_id`, `session_id`, `model`, `provider`, token breakdown, cost, and timestamp. The entire batch carries the **Schema Version**, **Collector Version**, **Client Hostname**, and **Source Database ID**.
+7. **Batch Construction** — Each raw record is mapped to the canonical wire format defined by the Gateway's `/ingest` schema: `source_record_id`, `session_id`, `model`, `provider`, token breakdown, cost, and timestamp. The batch also includes the projection snapshots read in step 6 as separate top-level arrays: `session_contexts`, `project_snapshots`, `project_directory_snapshots`, and `todo_snapshots`. The entire batch carries the **Schema Version**, **Collector Version**, **Client Hostname**, and **Source Database ID**.
 
-7. **POST to Gateway** — The Ingest Batch is POSTed to `{GATEWAY_BASE_URL}/ingest` with the bearer **Collector Token** in the `Authorization` header. The Gateway applies first-write-wins deduplication using the Idempotency Key.
+8. **POST to Gateway** — The Ingest Batch (usage records + projection snapshots) is POSTed to `{GATEWAY_BASE_URL}/ingest` with the bearer **Collector Token** in the `Authorization` header. The Gateway applies first-write-wins deduplication using the Idempotency Key.
 
-8. **Retry Logic** — On connection errors or 5xx responses, the collector retries up to 3 times with exponential backoff (starting at 1 second, doubling to 30 seconds max, with ±25% jitter to avoid thundering herd). 4xx responses are NOT retried — they indicate a configuration or data problem.
+9. **Retry Logic** — On connection errors or 5xx responses, the collector retries up to 3 times with exponential backoff (starting at 1 second, doubling to 30 seconds max, with ±25% jitter to avoid thundering herd). 4xx responses are NOT retried — they indicate a configuration or data problem.
 
-9. **Cursor Update** — Only after a successful 2xx response is the cursor advanced. The new cursor is set to the maximum `OccurredAt` timestamp among the sent records. This ensures that failed sends are retried on the next cycle — no records are skipped or lost.
+10. **Cursor Update** — Only after a successful 2xx response is the cursor advanced. The new cursor is set to the maximum `OccurredAt` timestamp among the sent records. This ensures that failed sends are retried on the next cycle — no records are skipped or lost.
 
 ### Phase 4: Heartbeat
 
-10. **Heartbeat Check** — If no new records were found for a Source Database, the collector checks two conditions:
+11. **Heartbeat Check** — If no new records were found for a Source Database, the collector checks two conditions:
     - Has at least one prior successful POST been recorded for this database? (Prevents backfilling with heartbeats.)
     - Has the **Heartbeat Interval** (default: 120 seconds) elapsed since the last success?
 
-11. **Heartbeat Send** — If both conditions are met, the collector POSTs an empty Ingest Batch (zero records) to the Gateway. This updates the Source Database's `last_seen_at` timestamp on the Gateway, confirming the collector and database are alive, without inserting any usage rows.
+12. **Heartbeat Send** — If both conditions are met, the collector POSTs an empty Ingest Batch (zero records) to the Gateway. This updates the Source Database's `last_seen_at` timestamp on the Gateway, confirming the collector and database are alive, without inserting any usage rows.
 
 ## ADR References
 
@@ -163,7 +172,11 @@ This document uses the following terms consistently, as defined in [CONTEXT.md](
 | **Gateway** | The central observability service that ingests, deduplicates, stores, and reports usage telemetry. |
 | **Source Database** | A local OpenCode SQLite `.db` file containing sessions, messages, and usage data. |
 | **Usage Record** | A single normalized record derived from one assistant `message.data` usage JSON blob. |
-| **Ingest Batch** | A set of Usage Records POSTed to the Gateway's `/ingest` endpoint in a single HTTP request. |
+| **Session Context** | Descriptive metadata read from an OpenCode `session` row (title, agent, project ID, etc.) sent as a batch-level snapshot. |
+| **Project Snapshot** | A read-only snapshot of OpenCode project metadata (title, worktree path) read from the `project` table. |
+| **Project Directory Snapshot** | A read-only mapping from a project to a directory path from the `project_directory` table. |
+| **Todo Snapshot** | The latest observed set of OpenCode `todo` rows for a session sent as a batch-level snapshot. |
+| **Ingest Batch** | A set of Usage Records and projection snapshots POSTed to the Gateway's `/ingest` endpoint in a single HTTP request. |
 | **Heartbeat** | An empty Ingest Batch signaling the collector is alive. |
 | **Cursor** | A persisted timestamp indicating the last processed `message.time_updated` value for a Source Database. |
 | **Canonical Record** | The single authoritative shape for a Usage Record, defined in ADR-0002. |
@@ -186,9 +199,17 @@ internal/
 ├── sqlite/         → Phase 1 (Discovery & Reading)
 │   ├── discovery.go → DiscoverDatabases — scans directories for *.db files
 │   │                  OpenAndInspect — validates SQLite schema & table presence
+│   │                    detects optional tables (project, project_directory, todo)
+│   │                    returns DatabaseInfo with column-level schema metadata
 │   ├── reader.go    → OpenCodeReader — cursor-based incremental reads
 │   │                  ReadRecords — parameterized query with cursor and limit
-│   └── types.go     → UsageRecord, DatabaseInfo types
+│   │                  ReadSessionContexts — session metadata by ID
+│   │                  ReadProjectData — project snapshots by project ID
+│   │                  ReadProjectDirectoryData — directory mappings by project ID
+│   │                  ReadTodoData — todo items by session ID
+│   │                  WithSchemaInfo — attaches DatabaseInfo for schema-aware reads
+│   └── types.go     → UsageRecord, DatabaseInfo, SessionContextData,
+│                      ProjectData, ProjectDirectoryData, TodoData types
 │
 ├── identity/       → Phase 1 (Identity)
 │   └── identity.go  → Store.GetOrCreateIdentity — assigns stable UUID v4
@@ -204,6 +225,10 @@ internal/
 │   │                  Attaches Client Hostname to every request
 │   └── types.go     → UsageRecord, IngestRecord, IngestRequest,
 │                      IngestResponse, BatchResult types
+│                      SessionContext, ProjectSnapshot,
+│                      ProjectDirectorySnapshot, TodoSnapshot wire types
+│                      MapToSessionContext, MapToProjectSnapshot,
+│                      MapToProjectDirectorySnapshot, MapToTodoSnapshot helpers
 │
 ├── heartbeat/      → Phase 4 (Heartbeat)
 │   └── heartbeat.go → BuildHeartbeat — constructs an empty IngestRequest
@@ -214,8 +239,10 @@ internal/
                        Run — main ticker loop (poll interval)
                        iterate — one full scan-and-push cycle
                        resolveDatabases — discovery + inspection + identity
-                       processDatabase — cursor read → send or heartbeat
-                       sendRecords — convert → POST → advance cursor
+                       processDatabase — cursor read → read projections → send or heartbeat
+                       sendRecords — convert records + map projections → POST → advance cursor
+                         dedupSessionContexts, dedupProjectSnapshots,
+                         dedupProjectDirectorySnapshots, dedupTodoSnapshots
                        maybeSendHeartbeat — heartbeat eligibility check
 ```
 

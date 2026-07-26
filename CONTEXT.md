@@ -14,7 +14,11 @@
 
 **Usage Record** — A single normalized record derived from one assistant `message.data` usage JSON blob. Contains tokens, cost, model, provider, and timestamps. *Avoid: "usage event", "telemetry point"*
 
-**Session Context** — Descriptive metadata read from an OpenCode `session` row and related project tables in a Source Database. Includes facts such as title, agent, external project ID, project worktree, parent external session ID, workspace ID, model, and code-change summary counts. It is read-only telemetry forwarded to the Gateway; the Collector must not write it back to the Source Database. *Avoid: "session usage", "collector enrichment"*
+**Session Context** — Descriptive metadata read from an OpenCode `session` row in a Source Database. Includes facts such as title, agent, external project ID, parent external session ID, workspace ID, and model. It is read-only telemetry forwarded to the Gateway; the Collector must not write it back to the Source Database. *Avoid: "session usage", "collector enrichment"*
+
+**Project Snapshot** — A read-only snapshot of OpenCode project metadata (title, worktree path) read from the `project` table in a Source Database. Forwarded alongside usage records in the ingest batch for Gateway agent-run reporting. *Avoid: "project context", "project enrichment"*
+
+**Project Directory Snapshot** — A read-only mapping from a project to a directory path, read from the optional `project_directory` table. Forwarded alongside usage records in the ingest batch. *Avoid: "project directory context"*
 
 **Todo Snapshot** — The latest observed set of OpenCode `todo` rows for a Session in a Source Database. It is read-only telemetry forwarded to the Gateway for agent run reporting. *Avoid: "todo events", "task timeline"*
 
@@ -41,6 +45,10 @@
 - An assistant **Message** produces **0..1 Usage Records** (user messages have none).
 - A **Session** may provide **0..1 Session Context** snapshots for Gateway reporting.
 - **Session Context** is sent as a separate batch-level collection, not duplicated onto each **Usage Record**.
+- A **Source Database** may contain **0..N Projects**, each providing **0..1 Project Snapshot** for Gateway reporting.
+- **Project Snapshots** are sent as a separate batch-level collection, not duplicated onto each **Usage Record**.
+- A **Project** may have **0..N Project Directory Snapshots** for Gateway reporting.
+- **Project Directory Snapshots** are sent as a separate batch-level collection, not duplicated onto each **Usage Record**.
 - A **Session** may provide **0..N Todo Snapshot** items for Gateway reporting.
 - **Todo Snapshots** are sent as a separate batch-level collection, not duplicated onto each **Usage Record**.
 - A **Usage Record** is sent in an **Ingest Batch** to the **Gateway**.
