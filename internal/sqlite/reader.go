@@ -128,8 +128,10 @@ type messageData struct {
 		Input      int64 `json:"input"`
 		Output     int64 `json:"output"`
 		Reasoning  int64 `json:"reasoning"`
-		CacheRead  int64 `json:"cache_read"`
-		CacheWrite int64 `json:"cache_write"`
+		Cache      struct {
+			Read  int64 `json:"read"`
+			Write int64 `json:"write"`
+		} `json:"cache"`
 		Total      int64 `json:"total"`
 	} `json:"tokens"`
 }
@@ -165,8 +167,8 @@ func mapRecord(
 		TokensInput:          md.Tokens.Input,
 		TokensOutput:         md.Tokens.Output,
 		TokensReasoning:      md.Tokens.Reasoning,
-		TokensCacheRead:      md.Tokens.CacheRead,
-		TokensCacheWrite:     md.Tokens.CacheWrite,
+		TokensCacheRead:      md.Tokens.Cache.Read,
+		TokensCacheWrite:     md.Tokens.Cache.Write,
 		TokensTotal:          md.Tokens.Total,
 		OpenCodeReportedCost: md.Cost,
 		CostCurrency:         "USD",
