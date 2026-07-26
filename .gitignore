@@ -32,6 +32,9 @@ Desktop.ini
 # Collector state files
 .collector-*
 
+# Local automation metadata
+.status/
+
 # Docker
 docker-compose.override.yml
 
