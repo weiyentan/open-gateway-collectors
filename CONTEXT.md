@@ -14,6 +14,12 @@
 
 **Usage Record** — A single normalized record derived from one assistant `message.data` usage JSON blob. Contains tokens, cost, model, provider, and timestamps. *Avoid: "usage event", "telemetry point"*
 
+**Session Context** — Descriptive metadata read from an OpenCode `session` row and related project tables in a Source Database. Includes facts such as title, agent, external project ID, project worktree, parent external session ID, workspace ID, model, and code-change summary counts. It is read-only telemetry forwarded to the Gateway; the Collector must not write it back to the Source Database. *Avoid: "session usage", "collector enrichment"*
+
+**Todo Snapshot** — The latest observed set of OpenCode `todo` rows for a Session in a Source Database. It is read-only telemetry forwarded to the Gateway for agent run reporting. *Avoid: "todo events", "task timeline"*
+
+**Agent Run Summary** — A Gateway-facing summary of what happened during an OpenCode agent or subagent session, composed from Usage Records, Session Context, Todo Snapshots, project snapshots, and parent/child session relationships. It is not a transcript or event replay.
+
 **Ingest Batch** — A set of usage records POSTed to the Gateway's `/ingest` endpoint in a single HTTP request. May be empty (heartbeat).
 
 **Heartbeat** — An empty ingest batch that communicates the collector is alive. Updates the source database's `last_seen_at` timestamp on the Gateway without inserting usage rows.
@@ -33,6 +39,10 @@
 - A **Collector** manages **0..N Source Databases**, each with its own **Identity**.
 - A **Source Database** contains **0..N Sessions**, each containing **0..N Messages**.
 - An assistant **Message** produces **0..1 Usage Records** (user messages have none).
+- A **Session** may provide **0..1 Session Context** snapshots for Gateway reporting.
+- **Session Context** is sent as a separate batch-level collection, not duplicated onto each **Usage Record**.
+- A **Session** may provide **0..N Todo Snapshot** items for Gateway reporting.
+- **Todo Snapshots** are sent as a separate batch-level collection, not duplicated onto each **Usage Record**.
 - A **Usage Record** is sent in an **Ingest Batch** to the **Gateway**.
 - An **Ingest Batch** is identified by a **Batch ID** (UUID) returned by the Gateway.
 - The **Idempotency Key** spans **Collector** (via client identity) → **Source Database** → **Usage Record**.
