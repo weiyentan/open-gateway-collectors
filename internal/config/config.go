@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -17,9 +18,11 @@ const defaultBatchLimit = 100
 // Config holds all configuration for the collector application.
 type Config struct {
 	// Token is the bearer token used to authenticate to the Gateway.
+	// Required when Transport is "http".
 	Token string `env:"GATEWAY_COLLECTOR_TOKEN"`
 
 	// BaseURL is the base URL of the Gateway API.
+	// Required when Transport is "http".
 	BaseURL string `env:"GATEWAY_BASE_URL"`
 
 	// PollInterval is how often to poll source databases for new usage records.
@@ -49,6 +52,22 @@ type Config struct {
 	// ExcludeRecheckInterval is how often to recheck an excluded database.
 	// Defaults to 3 hours.
 	ExcludeRecheckInterval time.Duration `env:"GATEWAY_COLLECTOR_EXCLUDE_RECHECK_INTERVAL"`
+
+	// Transport selects the transport mechanism for sending ingest batches.
+	// Valid values: "http", "kafka". Default: "kafka".
+	Transport string `env:"GATEWAY_COLLECTOR_TRANSPORT"`
+
+	// KafkaBrokers is a comma-separated list of Kafka bootstrap brokers.
+	// Required when Transport is "kafka".
+	KafkaBrokers []string `env:"GATEWAY_KAFKA_BROKERS"`
+
+	// KafkaTopic is the Kafka topic to produce ingest batches to.
+	// Default: "opencode-usage".
+	KafkaTopic string `env:"GATEWAY_KAFKA_TOPIC"`
+
+	// KafkaClientID is the Kafka client ID used when connecting to brokers.
+	// Defaults to the hostname.
+	KafkaClientID string `env:"GATEWAY_KAFKA_CLIENT_ID"`
 }
 
 // Load reads configuration from environment variables with defaults.
@@ -65,6 +84,10 @@ func Load() (*Config, error) {
 		LogLevel:               getEnvWithDefault("GATEWAY_COLLECTOR_LOG_LEVEL", "info"),
 		CursorDir:              getEnvWithDefault("GATEWAY_COLLECTOR_CURSOR_DIR", defaultCursorDir()),
 		ExcludeRecheckInterval: getDurationEnv("GATEWAY_COLLECTOR_EXCLUDE_RECHECK_INTERVAL", 3*time.Hour),
+		Transport:              getEnvWithDefault("GATEWAY_COLLECTOR_TRANSPORT", "kafka"),
+		KafkaBrokers:           getStringSliceEnv("GATEWAY_KAFKA_BROKERS"),
+		KafkaTopic:             getEnvWithDefault("GATEWAY_KAFKA_TOPIC", "opencode-usage"),
+		KafkaClientID:          os.Getenv("GATEWAY_KAFKA_CLIENT_ID"),
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -76,11 +99,28 @@ func Load() (*Config, error) {
 
 // Validate checks that required fields are set and optional fields are valid.
 func (c *Config) Validate() error {
-	if c.Token == "" {
-		return fmt.Errorf("GATEWAY_COLLECTOR_TOKEN is required")
-	}
-	if c.BaseURL == "" {
-		return fmt.Errorf("GATEWAY_BASE_URL is required")
+	switch c.Transport {
+	case "http":
+		if c.Token == "" {
+			return fmt.Errorf("GATEWAY_COLLECTOR_TOKEN is required for http transport")
+		}
+		if c.BaseURL == "" {
+			return fmt.Errorf("GATEWAY_BASE_URL is required for http transport")
+		}
+	case "kafka":
+		if len(c.KafkaBrokers) == 0 {
+			return fmt.Errorf("GATEWAY_KAFKA_BROKERS is required for kafka transport")
+		}
+	case "":
+		// Default to http for backward compatibility (tests, embedded use).
+		if c.Token == "" {
+			return fmt.Errorf("GATEWAY_COLLECTOR_TOKEN is required")
+		}
+		if c.BaseURL == "" {
+			return fmt.Errorf("GATEWAY_BASE_URL is required")
+		}
+	default:
+		return fmt.Errorf("GATEWAY_COLLECTOR_TRANSPORT must be http or kafka, got: %s", c.Transport)
 	}
 	if c.PollInterval <= 0 {
 		return fmt.Errorf("GATEWAY_COLLECTOR_POLL_INTERVAL must be positive")
@@ -159,4 +199,22 @@ func getEnvWithDefault(key, defaultVal string) string {
 		return defaultVal
 	}
 	return val
+}
+
+// getStringSliceEnv reads a comma-separated environment variable and returns
+// a slice of trimmed, non-empty strings. Returns nil if the variable is unset.
+func getStringSliceEnv(key string) []string {
+	val := os.Getenv(key)
+	if val == "" {
+		return nil
+	}
+	parts := strings.Split(val, ",")
+	var out []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
