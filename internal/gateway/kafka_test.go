@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -135,7 +134,6 @@ func TestNewKafkaClient_EmptyHostname(t *testing.T) {
 // KafkaClient and then inspecting the serialised JSON.
 func TestKafkaClient_SendBatch_SetsClientHostname(t *testing.T) {
 	kc := &KafkaClient{
-		client:   nil, // not needed for this test
 		topic:    "test-topic",
 		hostname: "kafka-host-007",
 	}
@@ -149,11 +147,9 @@ func TestKafkaClient_SendBatch_SetsClientHostname(t *testing.T) {
 		},
 	}
 
-	// Replicate the first two lines of SendBatch to verify behaviour.
-	req.ClientHostname = kc.hostname
-	body, err := json.Marshal(req)
+	body, err := kc.prepareRequest(req)
 	if err != nil {
-		t.Fatalf("marshal request: %v", err)
+		t.Fatalf("prepareRequest: %v", err)
 	}
 
 	// Verify the JSON body contains the hostname.
@@ -176,8 +172,10 @@ func TestKafkaClient_SendBatch_SetsClientHostname(t *testing.T) {
 		SchemaVersion:    "1.1",
 		SourceDatabaseID: "db-2",
 	}
-	req2.ClientHostname = kc2.hostname
-	body2, _ := json.Marshal(req2)
+	body2, err := kc2.prepareRequest(req2)
+	if err != nil {
+		t.Fatalf("prepareRequest: %v", err)
+	}
 	if !strings.Contains(string(body2), `"another-host"`) {
 		t.Errorf("serialised body does not contain second hostname: %s", string(body2))
 	}
@@ -198,11 +196,9 @@ func TestKafkaClient_SendBatch_HostnameOverridesRequest(t *testing.T) {
 		SourceDatabaseID: "db-3",
 	}
 
-	// Simulate SendBatch hostname assignment.
-	req.ClientHostname = kc.hostname
-	body, err := json.Marshal(req)
+	body, err := kc.prepareRequest(req)
 	if err != nil {
-		t.Fatalf("marshal: %v", err)
+		t.Fatalf("prepareRequest: %v", err)
 	}
 
 	// Verify the constructor hostname won, not the request's original value.

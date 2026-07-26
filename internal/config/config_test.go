@@ -12,8 +12,9 @@ func TestLoadDefaults(t *testing.T) {
 	defer restoreEnv(saved)
 	clearEnv()
 
-	// Set required fields for kafka transport (the default).
-	t.Setenv("GATEWAY_KAFKA_BROKERS", "localhost:9092")
+	// Set required fields for http transport (the default).
+	t.Setenv("GATEWAY_COLLECTOR_TOKEN", "test-token")
+	t.Setenv("GATEWAY_BASE_URL", "http://localhost:8080")
 
 	cfg, err := Load()
 	if err != nil {
@@ -32,8 +33,14 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.LogLevel != "info" {
 		t.Errorf("LogLevel = %q, want %q", cfg.LogLevel, "info")
 	}
-	if cfg.Transport != "kafka" {
-		t.Errorf("Transport = %q, want %q", cfg.Transport, "kafka")
+	if cfg.Transport != "http" {
+		t.Errorf("Transport = %q, want %q", cfg.Transport, "http")
+	}
+	if cfg.Token != "test-token" {
+		t.Errorf("Token = %q, want %q", cfg.Token, "test-token")
+	}
+	if cfg.BaseURL != "http://localhost:8080" {
+		t.Errorf("BaseURL = %q, want %q", cfg.BaseURL, "http://localhost:8080")
 	}
 	if cfg.KafkaTopic != "opencode-usage" {
 		t.Errorf("KafkaTopic = %q, want %q", cfg.KafkaTopic, "opencode-usage")

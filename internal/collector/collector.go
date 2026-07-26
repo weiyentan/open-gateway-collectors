@@ -6,6 +6,7 @@ package collector
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"sync"
@@ -139,6 +140,12 @@ func (c *Collector) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			// Close transport if it supports io.Closer (e.g., KafkaClient).
+			if closer, ok := c.transport.(io.Closer); ok {
+				if err := closer.Close(); err != nil {
+					c.logger.Error("closing transport", "error", err)
+				}
+			}
 			c.logger.Info("collector shutting down")
 			return ctx.Err()
 		case <-ticker.C:

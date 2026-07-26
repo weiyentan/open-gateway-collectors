@@ -40,6 +40,14 @@ func NewKafkaClient(brokers []string, topic, clientID, hostname string) (*KafkaC
 	}, nil
 }
 
+// prepareRequest sets the client hostname on the request and marshals it.
+// The returned byte slice is ready for sending (either as an HTTP body or
+// Kafka message value).
+func (k *KafkaClient) prepareRequest(req *IngestRequest) ([]byte, error) {
+	req.ClientHostname = k.hostname
+	return json.Marshal(req)
+}
+
 // SendBatch serialises req to JSON and produces it to the configured Kafka
 // topic. The message is keyed by req.SourceDatabaseID (or a placeholder if
 // empty) for deterministic partitioning. The call blocks until Kafka
@@ -49,9 +57,7 @@ func NewKafkaClient(brokers []string, topic, clientID, hostname string) (*KafkaC
 // number of records in the batch. On failure it returns an error; no
 // response is returned.
 func (k *KafkaClient) SendBatch(ctx context.Context, req *IngestRequest) (*IngestResponse, error) {
-	req.ClientHostname = k.hostname
-
-	body, err := json.Marshal(req)
+	body, err := k.prepareRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
@@ -78,4 +84,11 @@ func (k *KafkaClient) SendBatch(ctx context.Context, req *IngestRequest) (*Inges
 	return &IngestResponse{
 		AcceptedCount: len(req.Records),
 	}, nil
+}
+
+// Close shuts down the underlying Kafka client, releasing connections and
+// goroutines. After Close returns, the KafkaClient MUST NOT be used.
+func (k *KafkaClient) Close() error {
+	k.client.Close()
+	return nil
 }

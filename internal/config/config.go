@@ -84,7 +84,7 @@ func Load() (*Config, error) {
 		LogLevel:               getEnvWithDefault("GATEWAY_COLLECTOR_LOG_LEVEL", "info"),
 		CursorDir:              getEnvWithDefault("GATEWAY_COLLECTOR_CURSOR_DIR", defaultCursorDir()),
 		ExcludeRecheckInterval: getDurationEnv("GATEWAY_COLLECTOR_EXCLUDE_RECHECK_INTERVAL", 3*time.Hour),
-		Transport:              getEnvWithDefault("GATEWAY_COLLECTOR_TRANSPORT", "kafka"),
+		Transport:              getEnvWithDefault("GATEWAY_COLLECTOR_TRANSPORT", "http"),
 		KafkaBrokers:           getStringSliceEnv("GATEWAY_KAFKA_BROKERS"),
 		KafkaTopic:             getEnvWithDefault("GATEWAY_KAFKA_TOPIC", "opencode-usage"),
 		KafkaClientID:          os.Getenv("GATEWAY_KAFKA_CLIENT_ID"),
