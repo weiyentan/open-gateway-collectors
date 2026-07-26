@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -877,9 +878,127 @@ func TestCollector_GracefulShutdown(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Tests: toGatewayUsageRecord
-// ---------------------------------------------------------------------------
+func TestCollector_UsesMockTransport(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "mock-batch-001",
+		AcceptedCount: 2,
+	})
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+
+	c, err := NewCollector(cfg, "0.1.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	// Override the transport with our mock.
+	c.transport = mockTransport
+
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2"}, now),
+	}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+	if len(dbs) != 1 {
+		t.Fatalf("expected 1 DB, got %d", len(dbs))
+	}
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	// Verify the mock Transport was called exactly once.
+	if mockTransport.CallCount() != 1 {
+		t.Fatalf("MockTransport CallCount = %d, want 1", mockTransport.CallCount())
+	}
+
+	call := mockTransport.LastCall()
+	req := call.Req
+
+	// Verify the request is well-formed.
+	if req.SchemaVersion != gateway.SchemaVersion {
+		t.Errorf("SchemaVersion = %q, want %q", req.SchemaVersion, gateway.SchemaVersion)
+	}
+	if req.CollectorVersion != "0.1.0" {
+		t.Errorf("CollectorVersion = %q, want %q", req.CollectorVersion, "0.1.0")
+	}
+	if req.SourceDatabaseID == "" {
+		t.Error("SourceDatabaseID is empty")
+	}
+	if len(req.Records) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(req.Records))
+	}
+
+	// Verify cursor was updated after successful send via mock.
+	cursor, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	expectedCursor := now.Add(1 * time.Second)
+	if !cursor.Equal(expectedCursor) {
+		t.Errorf("cursor = %v, want %v", cursor, expectedCursor)
+	}
+}
+
+func TestCollector_MockTransportErrorPropagation(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	mockTransport := gateway.NewMockTransport(nil)
+	mockTransport.Err = fmt.Errorf("transport failure")
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+
+	c, err := NewCollector(cfg, "0.1.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	c.transport = mockTransport
+
+	// Set a known initial cursor.
+	initialCursor := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := c.tracker.SetCursor(dbPath, initialCursor); err != nil {
+		t.Fatalf("SetCursor: %v", err)
+	}
+
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2"}, now),
+	}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, _ := c.resolveDatabases()
+	c.processDatabase(context.Background(), dbs[0])
+
+	// Verify the mock was called (even on error).
+	if mockTransport.CallCount() != 1 {
+		t.Fatalf("MockTransport CallCount = %d, want 1", mockTransport.CallCount())
+	}
+
+	// Cursor must NOT advance on transport error.
+	cursor, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	if !cursor.Equal(initialCursor) {
+		t.Errorf("cursor advanced to %v on transport error, want %v", cursor, initialCursor)
+	}
+}
 
 func TestToGatewayUsageRecord_MapsCorrectly(t *testing.T) {
 	sqlRec := sqlite.UsageRecord{

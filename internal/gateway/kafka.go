@@ -12,14 +12,17 @@ import (
 // messages to a Kafka topic. Each message is keyed by source_database_id
 // for partition co-location.
 type KafkaClient struct {
-	client *kgo.Client
-	topic  string
+	client   *kgo.Client
+	topic    string
+	hostname string
 }
 
 // NewKafkaClient creates a KafkaClient connected to the given brokers.
 // topic is the Kafka topic to produce to. clientID is the Kafka client
 // identifier sent to brokers (if empty, the franz-go default "kgo" is used).
-func NewKafkaClient(brokers []string, topic, clientID string) (*KafkaClient, error) {
+// hostname is the machine hostname attached to every outgoing IngestRequest by
+// SendBatch for operational visibility.
+func NewKafkaClient(brokers []string, topic, clientID, hostname string) (*KafkaClient, error) {
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(brokers...),
 	}
@@ -31,8 +34,9 @@ func NewKafkaClient(brokers []string, topic, clientID string) (*KafkaClient, err
 		return nil, fmt.Errorf("kafka new client: %w", err)
 	}
 	return &KafkaClient{
-		client: cl,
-		topic:  topic,
+		client:   cl,
+		topic:    topic,
+		hostname: hostname,
 	}, nil
 }
 
@@ -45,6 +49,8 @@ func NewKafkaClient(brokers []string, topic, clientID string) (*KafkaClient, err
 // number of records in the batch. On failure it returns an error; no
 // response is returned.
 func (k *KafkaClient) SendBatch(ctx context.Context, req *IngestRequest) (*IngestResponse, error) {
+	req.ClientHostname = k.hostname
+
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)

@@ -86,7 +86,7 @@ func NewCollector(cfg *config.Config, version string) (*Collector, error) {
 	case "http":
 		transport = gateway.NewClient(cfg.BaseURL, cfg.Token, hostname)
 	case "kafka":
-		transport, err = gateway.NewKafkaClient(cfg.KafkaBrokers, cfg.KafkaTopic, cfg.KafkaClientID)
+		transport, err = gateway.NewKafkaClient(cfg.KafkaBrokers, cfg.KafkaTopic, cfg.KafkaClientID, hostname)
 		if err != nil {
 			return nil, fmt.Errorf("create kafka client: %w", err)
 		}
