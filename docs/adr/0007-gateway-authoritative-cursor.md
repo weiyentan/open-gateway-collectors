@@ -1,3 +1,3 @@
-# Gateway-authoritative cursor via GET /cursor endpoint
+# ADR-0007: Gateway-authoritative cursor via GET /cursor endpoint
 
 The collector originally tracked its read cursor in a local .collector-state file, creating a crash-between-ack-and-persist gap where a batch could be accepted by the Gateway but the cursor never advanced, causing redundant re-delivery on restart. We add a GET /cursor?source_database_id= endpoint to the Gateway that returns the last_seen_at timestamp from the source_databases table, making the Gateway the authoritative cursor source for the collector. The collector queries this endpoint on startup to determine its starting position; a local .collector-state cache is retained as a fallback when the Gateway is unreachable. This eliminates the cursor persistence window and removes the risk of state-file corruption causing silent data loss.

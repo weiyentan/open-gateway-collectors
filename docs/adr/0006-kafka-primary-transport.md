@@ -1,3 +1,3 @@
-# Kafka as primary transport for usage ingestion
+# ADR-0006: Kafka as primary transport for usage ingestion
 
 The collector originally transmitted usage records to the Gateway via direct HTTP POST to /ingest, which synchronously coupled collector progress to Gateway availability — if the Gateway was unreachable the collector could not advance its cursor. We introduce Kafka as the primary transport: the collector produces batched IngestRequest messages to a `opencode-usage` topic (keyed by source_database_id for per-database ordering) and a separate Python Consumer container running in the Gateway namespace reads from Kafka and POSTs to the Gateway's existing /ingest endpoint. This decouples ingestion from Gateway availability: the collector advances its cursor on Kafka produce acknowledgement rather than waiting for Gateway processing, and the Gateway can be restarted or scaled without losing data — records buffer durably in Kafka and replay automatically.
