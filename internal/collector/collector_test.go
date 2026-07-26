@@ -628,6 +628,128 @@ func TestCollector_HeartbeatSkippedWhenIntervalNotElapsed(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Tests: lastSuccess seeding from persisted cursor
+// ---------------------------------------------------------------------------
+
+func TestCollector_SeedsLastSuccessFromPersistedCursor(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+
+	c, err := NewCollector(cfg, "0.1.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	// Pre-set a cursor to simulate a previously-tracked database.
+	pastTime := time.Now().Add(-1 * time.Hour)
+	if err := c.tracker.SetCursor(dbPath, pastTime); err != nil {
+		t.Fatalf("SetCursor: %v", err)
+	}
+
+	mock := &mockReader{}
+	c.newReader = func(_ string) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	// Execute one full iteration.
+	c.iterate(context.Background())
+
+	// Verify lastSuccess was seeded for this database.
+	c.mu.Lock()
+	seededTime, exists := c.lastSuccess[dbPath]
+	c.mu.Unlock()
+	if !exists {
+		t.Fatal("lastSuccess was NOT seeded for database with persisted cursor")
+	}
+
+	// Verify the seed uses time.Now(), not the cursor timestamp.
+	// The cursor was set to 1 hour ago, so a correctly seeded value
+	// should be within the last second.
+	if time.Since(seededTime) > time.Second {
+		t.Errorf("lastSuccess time is too old: %v (expected ~time.Now(), not cursor timestamp)", seededTime)
+	}
+}
+
+func TestCollector_DoesNotSeedLastSuccessWithoutCursor(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+
+	c, err := NewCollector(cfg, "0.1.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	// No cursor is set — database has never been tracked.
+
+	mock := &mockReader{}
+	c.newReader = func(_ string) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	c.iterate(context.Background())
+
+	// Verify lastSuccess was NOT seeded.
+	c.mu.Lock()
+	_, exists := c.lastSuccess[dbPath]
+	c.mu.Unlock()
+	if exists {
+		t.Error("lastSuccess was seeded for database without a persisted cursor")
+	}
+}
+
+func TestCollector_SeedEnablesHeartbeat(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	srv, lastReq := gatewayServer(http.StatusCreated, gateway.IngestResponse{
+		BatchID:       "hb-seeded-001",
+		AcceptedCount: 0,
+	})
+	defer srv.Close()
+
+	cfg := testConfig(srv.URL)
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.HeartbeatInterval = time.Nanosecond // effectively always elapsed
+
+	c, err := NewCollector(cfg, "0.1.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	// Pre-set a cursor.
+	pastTime := time.Now().Add(-1 * time.Hour)
+	if err := c.tracker.SetCursor(dbPath, pastTime); err != nil {
+		t.Fatalf("SetCursor: %v", err)
+	}
+
+	mock := &mockReader{}
+	c.newReader = func(_ string) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	c.iterate(context.Background())
+
+	// Verify a heartbeat was sent (indirectly proves lastSuccess was seeded
+	// and the seeding enables the heartbeat path).
+	req, ok := lastReq.Load().(gateway.IngestRequest)
+	if !ok {
+		t.Fatal("no heartbeat request — lastSuccess was not seeded or heartbeat was skipped")
+	}
+	if len(req.Records) != 0 {
+		t.Errorf("expected heartbeat (0 records), got %d records", len(req.Records))
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Tests: Graceful shutdown
 // ---------------------------------------------------------------------------
 
