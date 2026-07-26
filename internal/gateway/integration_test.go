@@ -1,4 +1,4 @@
-package gateway
+package gateway_test
 
 import (
 	"database/sql"
@@ -8,6 +8,8 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/opencode-gateway/collectors/internal/collector"
+	"github.com/opencode-gateway/collectors/internal/gateway"
 	"github.com/opencode-gateway/collectors/internal/sqlite"
 )
 
@@ -104,31 +106,6 @@ func createIntegrationTestDB(t *testing.T) string {
 	return dbPath
 }
 
-// sqliteToGatewayUsageRecord replicates the collector's toGatewayUsageRecord()
-// mapping inline so the gateway package can exercise the full pipeline without
-// importing the collector package (which would create a circular dependency).
-func sqliteToGatewayUsageRecord(rec sqlite.UsageRecord) UsageRecord {
-	return UsageRecord{
-		SourceRecordID:   rec.SourceRecordID,
-		SessionID:        rec.SourceSessionID,
-		Model:            rec.ModelID,
-		ProviderID:       rec.ProviderID,
-		Mode:             rec.Mode,
-		Agent:            rec.Agent,
-		ProjectID:        rec.SourceProjectID,
-		WorkspaceID:      rec.WorkspaceID,
-		ParentSessionID:  rec.ParentSessionID,
-		ReasoningTokens:  rec.TokensReasoning,
-		FinishReason:     rec.FinishReason,
-		InputTokens:      rec.TokensInput,
-		OutputTokens:     rec.TokensOutput,
-		TokensCacheRead:  rec.TokensCacheRead,
-		TokensCacheWrite: rec.TokensCacheWrite,
-		EstimatedCostUSD: rec.OpenCodeReportedCost,
-		OccurredAt:       rec.OccurredAt,
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Integration test: full pipeline
 // ---------------------------------------------------------------------------
@@ -157,10 +134,10 @@ func TestFullPipeline_AllEnrichmentFields(t *testing.T) {
 	sqlRec := records[0]
 
 	// 3. Convert to gateway.UsageRecord (replicating toGatewayUsageRecord).
-	gwRec := sqliteToGatewayUsageRecord(sqlRec)
+	gwRec := collector.ToGatewayUsageRecord(sqlRec)
 
 	// 4. Convert to wire-format IngestRecord via MapToIngestRecord.
-	ingestRec := MapToIngestRecord(gwRec)
+	ingestRec := gateway.MapToIngestRecord(gwRec)
 
 	// 5. Assert every enrichment field survived the full pipeline.
 
@@ -344,8 +321,8 @@ func TestFullPipeline_ZeroCost(t *testing.T) {
 		t.Fatalf("expected 1 record, got %d", len(records))
 	}
 
-	gwRec := sqliteToGatewayUsageRecord(records[0])
-	ingestRec := MapToIngestRecord(gwRec)
+	gwRec := collector.ToGatewayUsageRecord(records[0])
+	ingestRec := gateway.MapToIngestRecord(gwRec)
 
 	// Zero cost → nil EstimatedCostUSD.
 	if ingestRec.EstimatedCostUSD != nil {

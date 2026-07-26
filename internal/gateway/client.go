@@ -19,7 +19,7 @@ import (
 const (
 	// SchemaVersion is the current schema version sent in IngestRequest.
 	// The Gateway uses this to validate and parse the request payload.
-	SchemaVersion = "1.2"
+	SchemaVersion = "1.1"
 
 	// defaultMaxRetries is the default number of retry attempts after the
 	// initial request (total attempts = maxRetries + 1).

@@ -11,7 +11,7 @@ type UsageRecord struct {
 	SourceRecordID   string    `json:"source_record_id"`
 	SessionID        string    `json:"session_id"`
 	Model            string    `json:"model"`
-	ProviderID       string    `json:"providerId"`
+	ProviderID       string    `json:"provider_id"`
 	Mode             string    `json:"mode"`
 	Agent            string    `json:"agent"`
 	ProjectID        string    `json:"project_id"`

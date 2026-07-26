@@ -567,7 +567,7 @@ func TestToGatewayUsageRecord_MapsCorrectly(t *testing.T) {
 		OccurredAt:           time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC),
 	}
 
-	gwRec := toGatewayUsageRecord(sqlRec)
+	gwRec := ToGatewayUsageRecord(sqlRec)
 
 	if gwRec.SourceRecordID != "rec-1" {
 		t.Errorf("SourceRecordID = %q, want %q", gwRec.SourceRecordID, "rec-1")
