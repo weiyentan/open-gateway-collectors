@@ -1143,6 +1143,77 @@ func TestCollector_DedupSessionContextsWithinBatch(t *testing.T) {
 	}
 }
 
+func TestCollector_DedupProjectDirectoriesWithinBatch(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	srv, lastReq := gatewayServer(http.StatusCreated, gateway.IngestResponse{
+		BatchID:       "batch-dedup-dir-001",
+		AcceptedCount: 2,
+	})
+
+	cfg := testConfig(srv.URL)
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+
+	c, err := NewCollector(cfg, "0.1.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2"}, now),
+		// Two directories for the same project.
+		projectDirs: []sqlite.ProjectDirectoryData{
+			{ExternalProjectID: "proj-1", Path: "/tmp/test/src"},
+			{ExternalProjectID: "proj-1", Path: "/tmp/test/lib"},
+		},
+		sessionCtxs: []sqlite.SessionContextData{
+			{ExternalSessionID: "sess-rec-1", ProjectID: "proj-1"},
+			{ExternalSessionID: "sess-rec-2", ProjectID: "proj-1"},
+		},
+		projects: []sqlite.ProjectData{
+			{ExternalProjectID: "proj-1", Title: "Test", Worktree: "/tmp/test"},
+		},
+	}
+
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, _ := c.resolveDatabases()
+	c.processDatabase(context.Background(), dbs[0])
+
+	req, ok := lastReq.Load().(gateway.IngestRequest)
+	if !ok {
+		t.Fatal("no request received")
+	}
+
+	// Both directories should be present — composite key dedup preserves them.
+	if len(req.ProjectDirectorySnapshots) != 2 {
+		t.Fatalf("expected 2 project directory snapshots (2 unique paths), got %d", len(req.ProjectDirectorySnapshots))
+	}
+
+	// Verify both paths are individually present.
+	seenSrc := false
+	seenLib := false
+	for _, pd := range req.ProjectDirectorySnapshots {
+		if pd.ExternalProjectID == "proj-1" && pd.Path == "/tmp/test/src" {
+			seenSrc = true
+		}
+		if pd.ExternalProjectID == "proj-1" && pd.Path == "/tmp/test/lib" {
+			seenLib = true
+		}
+	}
+	if !seenSrc {
+		t.Error("project directory snapshot for /tmp/test/src missing")
+	}
+	if !seenLib {
+		t.Error("project directory snapshot for /tmp/test/lib missing")
+	}
+}
+
 func TestCollector_CursorUnchangedWithProjections(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := createTestDB(t, dir, "test")

@@ -3,6 +3,7 @@ package sqlite
 import (
 	"database/sql"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -954,7 +955,7 @@ func TestSchemaInfo_ReflectsDetectedTables(t *testing.T) {
 		{sessionID: "sess-a", description: "Task", status: "pending"},
 	}
 
-	// DB with project and todo, no project_directory.
+	// DB with project and todo tables; project_directory table also created by helper (empty).
 	dbPath := createTestDBWithProjections(t, sessions, nil, projects, nil, todos)
 	r := openReaderWithSchema(t, dbPath)
 	defer r.Close()
@@ -972,10 +973,10 @@ func TestSchemaInfo_ReflectsDetectedTables(t *testing.T) {
 	if !info.HasTodoTable {
 		t.Error("HasTodoTable should be true")
 	}
-	if !containsStr(info.ProjectColumns, "title") {
+	if !slices.Contains(info.ProjectColumns, "title") {
 		t.Error("ProjectColumns should contain 'title'")
 	}
-	if !containsStr(info.TodoColumns, "status") {
+	if !slices.Contains(info.TodoColumns, "status") {
 		t.Error("TodoColumns should contain 'status'")
 	}
 }
@@ -1003,11 +1004,4 @@ func TestSchemaInfo_NoOptionalTables(t *testing.T) {
 	}
 }
 
-func containsStr(slice []string, s string) bool {
-	for _, v := range slice {
-		if v == s {
-			return true
-		}
-	}
-	return false
-}
+

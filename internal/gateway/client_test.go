@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -802,7 +803,7 @@ func TestIngestRequest_JSONSerialization_EmptyProjections(t *testing.T) {
 	// Verify projection fields are omitted when empty.
 	raw := string(body)
 	for _, field := range []string{"session_contexts", "project_snapshots", "project_directory_snapshots", "todo_snapshots"} {
-		if contains(t, raw, field) {
+		if strings.Contains(raw, field) {
 			t.Errorf("field %q should be omitted when empty, but found in: %s", field, raw)
 		}
 	}
@@ -816,12 +817,3 @@ func TestIngestRequest_JSONSerialization_EmptyProjections(t *testing.T) {
 	}
 }
 
-func contains(t *testing.T, s, substr string) bool {
-	t.Helper()
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}

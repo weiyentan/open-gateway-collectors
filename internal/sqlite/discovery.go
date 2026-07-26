@@ -164,6 +164,17 @@ func getSchemaVersion(db *sql.DB) (string, error) {
 // and returns its column names. If the table does not exist, it returns
 // (false, nil) without an error — optional tables are handled gracefully.
 func detectOptionalTable(db *sql.DB, name string) (bool, []string) {
+	// Validate table name to prevent SQL injection in PRAGMA table_info.
+	allowedTables := map[string]bool{
+		"project":           true,
+		"project_directory": true,
+		"todo":              true,
+		"session":           true,
+	}
+	if !allowedTables[name] {
+		return false, nil
+	}
+
 	var count int
 	if err := db.QueryRow(
 		"SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",

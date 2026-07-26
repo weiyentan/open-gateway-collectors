@@ -553,8 +553,9 @@ func dedupProjectDirectorySnapshots(data []sqlite.ProjectDirectoryData) []gatewa
 	seen := make(map[string]bool)
 	var result []gateway.ProjectDirectorySnapshot
 	for _, d := range data {
-		if d.ExternalProjectID != "" && !seen[d.ExternalProjectID] {
-			seen[d.ExternalProjectID] = true
+		key := d.ExternalProjectID + "\x00" + d.Path
+		if d.ExternalProjectID != "" && !seen[key] {
+			seen[key] = true
 			result = append(result, gateway.MapToProjectDirectorySnapshot(d))
 		}
 	}
