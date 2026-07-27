@@ -634,8 +634,8 @@ func TestMapToProjectSnapshot_AllFields(t *testing.T) {
 	if result.ExternalProjectID != "proj-1" {
 		t.Errorf("ExternalProjectID = %q, want %q", result.ExternalProjectID, "proj-1")
 	}
-	if result.Title != "My Project" {
-		t.Errorf("Title = %q, want %q", result.Title, "My Project")
+	if result.Name != "My Project" {
+		t.Errorf("Name = %q, want %q", result.Name, "My Project")
 	}
 	if result.Worktree != "/path/to/repo" {
 		t.Errorf("Worktree = %q, want %q", result.Worktree, "/path/to/repo")
@@ -651,8 +651,8 @@ func TestMapToProjectSnapshot_EmptyFields(t *testing.T) {
 	if result.ExternalProjectID != "proj-min" {
 		t.Errorf("ExternalProjectID = %q, want %q", result.ExternalProjectID, "proj-min")
 	}
-	if result.Title != "" {
-		t.Errorf("Title should be empty, got %q", result.Title)
+	if result.Name != "" {
+		t.Errorf("Name should be empty, got %q", result.Name)
 	}
 	if result.Worktree != "" {
 		t.Errorf("Worktree should be empty, got %q", result.Worktree)
@@ -669,8 +669,8 @@ func TestMapToProjectDirectorySnapshot(t *testing.T) {
 	if result.ExternalProjectID != "proj-1" {
 		t.Errorf("ExternalProjectID = %q, want %q", result.ExternalProjectID, "proj-1")
 	}
-	if result.Path != "/src/app" {
-		t.Errorf("Path = %q, want %q", result.Path, "/src/app")
+	if result.Directory != "/src/app" {
+		t.Errorf("Directory = %q, want %q", result.Directory, "/src/app")
 	}
 }
 
@@ -685,8 +685,8 @@ func TestMapToTodoSnapshot(t *testing.T) {
 	if result.ExternalSessionID != "sess-1" {
 		t.Errorf("ExternalSessionID = %q, want %q", result.ExternalSessionID, "sess-1")
 	}
-	if result.Description != "Fix login bug" {
-		t.Errorf("Description = %q, want %q", result.Description, "Fix login bug")
+	if result.Content != "Fix login bug" {
+		t.Errorf("Content = %q, want %q", result.Content, "Fix login bug")
 	}
 	if result.Status != "completed" {
 		t.Errorf("Status = %q, want %q", result.Status, "completed")
@@ -730,23 +730,23 @@ func TestIngestRequest_JSONSerialization_WithProjections(t *testing.T) {
 				ProjectID:         "proj-1",
 			},
 		},
-		ProjectSnapshots: []ProjectSnapshot{
+		Projects: []ProjectSnapshot{
 			{
 				ExternalProjectID: "proj-1",
-				Title:             "Test Project",
+				Name:              "Test Project",
 				Worktree:          "/tmp/test",
 			},
 		},
-		ProjectDirectorySnapshots: []ProjectDirectorySnapshot{
+		ProjectDirectories: []ProjectDirectorySnapshot{
 			{
 				ExternalProjectID: "proj-1",
-				Path:              "/tmp/test/src",
+				Directory:         "/tmp/test/src",
 			},
 		},
-		TodoSnapshots: []TodoSnapshot{
+		SessionTodos: []TodoSnapshot{
 			{
 				ExternalSessionID: "sess-1",
-				Description:       "Write tests",
+				Content:           "Write tests",
 				Status:            "pending",
 			},
 		},
@@ -770,19 +770,19 @@ func TestIngestRequest_JSONSerialization_WithProjections(t *testing.T) {
 		t.Errorf("session context mismatch")
 	}
 
-	if len(decoded.ProjectSnapshots) != 1 {
-		t.Fatalf("expected 1 project snapshot, got %d", len(decoded.ProjectSnapshots))
+	if len(decoded.Projects) != 1 {
+		t.Fatalf("expected 1 project snapshot, got %d", len(decoded.Projects))
 	}
-	if decoded.ProjectSnapshots[0].ExternalProjectID != "proj-1" {
+	if decoded.Projects[0].ExternalProjectID != "proj-1" {
 		t.Errorf("project snapshot mismatch")
 	}
 
-	if len(decoded.ProjectDirectorySnapshots) != 1 {
-		t.Fatalf("expected 1 project directory snapshot, got %d", len(decoded.ProjectDirectorySnapshots))
+	if len(decoded.ProjectDirectories) != 1 {
+		t.Fatalf("expected 1 project directory snapshot, got %d", len(decoded.ProjectDirectories))
 	}
 
-	if len(decoded.TodoSnapshots) != 1 {
-		t.Fatalf("expected 1 todo snapshot, got %d", len(decoded.TodoSnapshots))
+	if len(decoded.SessionTodos) != 1 {
+		t.Fatalf("expected 1 todo snapshot, got %d", len(decoded.SessionTodos))
 	}
 }
 
@@ -802,7 +802,7 @@ func TestIngestRequest_JSONSerialization_EmptyProjections(t *testing.T) {
 
 	// Verify projection fields are omitted when empty.
 	raw := string(body)
-	for _, field := range []string{"session_contexts", "project_snapshots", "project_directory_snapshots", "todo_snapshots"} {
+	for _, field := range []string{"session_contexts", "projects", "project_directories", "session_todos"} {
 		if strings.Contains(raw, field) {
 			t.Errorf("field %q should be omitted when empty, but found in: %s", field, raw)
 		}

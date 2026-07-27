@@ -382,14 +382,14 @@ func (c *Collector) sendRecords(
 	reqTodos := dedupTodoSnapshots(todos)
 
 	req := &gateway.IngestRequest{
-		SchemaVersion:              gateway.SchemaVersion,
-		CollectorVersion:           c.version,
-		SourceDatabaseID:           db.id,
-		Records:                    ingestRecords,
-		SessionContexts:            reqSessionCtxs,
-		ProjectSnapshots:           reqProjects,
-		ProjectDirectorySnapshots:  reqProjectDirs,
-		TodoSnapshots:              reqTodos,
+		SchemaVersion:     gateway.SchemaVersion,
+		CollectorVersion:  c.version,
+		SourceDatabaseID:  db.id,
+		Records:           ingestRecords,
+		SessionContexts:   reqSessionCtxs,
+		Projects:          reqProjects,
+		ProjectDirectories: reqProjectDirs,
+		SessionTodos:      reqTodos,
 	}
 
 	resp, err := c.transport.SendBatch(ctx, req)

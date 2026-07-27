@@ -1190,24 +1190,24 @@ func TestCollector_IncludesProjectionsInRequest(t *testing.T) {
 	}
 
 	// Verify project snapshots: 1 unique project.
-	if len(req.ProjectSnapshots) != 1 {
-		t.Fatalf("expected 1 project snapshot, got %d", len(req.ProjectSnapshots))
+	if len(req.Projects) != 1 {
+		t.Fatalf("expected 1 project snapshot, got %d", len(req.Projects))
 	}
-	if req.ProjectSnapshots[0].ExternalProjectID != "proj-1" {
-		t.Errorf("project id = %q, want %q", req.ProjectSnapshots[0].ExternalProjectID, "proj-1")
+	if req.Projects[0].ExternalProjectID != "proj-1" {
+		t.Errorf("project id = %q, want %q", req.Projects[0].ExternalProjectID, "proj-1")
 	}
-	if req.ProjectSnapshots[0].Title != "Test Project" {
-		t.Errorf("project title = %q, want %q", req.ProjectSnapshots[0].Title, "Test Project")
+	if req.Projects[0].Name != "Test Project" {
+		t.Errorf("project name = %q, want %q", req.Projects[0].Name, "Test Project")
 	}
 
 	// Verify project directory snapshots.
-	if len(req.ProjectDirectorySnapshots) != 1 {
-		t.Fatalf("expected 1 project directory snapshot, got %d", len(req.ProjectDirectorySnapshots))
+	if len(req.ProjectDirectories) != 1 {
+		t.Fatalf("expected 1 project directory snapshot, got %d", len(req.ProjectDirectories))
 	}
 
 	// Verify todo snapshots: 2 items.
-	if len(req.TodoSnapshots) != 2 {
-		t.Fatalf("expected 2 todo snapshots, got %d", len(req.TodoSnapshots))
+	if len(req.SessionTodos) != 2 {
+		t.Fatalf("expected 2 todo snapshots, got %d", len(req.SessionTodos))
 	}
 }
 
@@ -1310,18 +1310,18 @@ func TestCollector_DedupProjectDirectoriesWithinBatch(t *testing.T) {
 	}
 
 	// Both directories should be present — composite key dedup preserves them.
-	if len(req.ProjectDirectorySnapshots) != 2 {
-		t.Fatalf("expected 2 project directory snapshots (2 unique paths), got %d", len(req.ProjectDirectorySnapshots))
+	if len(req.ProjectDirectories) != 2 {
+		t.Fatalf("expected 2 project directory snapshots (2 unique paths), got %d", len(req.ProjectDirectories))
 	}
 
 	// Verify both paths are individually present.
 	seenSrc := false
 	seenLib := false
-	for _, pd := range req.ProjectDirectorySnapshots {
-		if pd.ExternalProjectID == "proj-1" && pd.Path == "/tmp/test/src" {
+	for _, pd := range req.ProjectDirectories {
+		if pd.ExternalProjectID == "proj-1" && pd.Directory == "/tmp/test/src" {
 			seenSrc = true
 		}
-		if pd.ExternalProjectID == "proj-1" && pd.Path == "/tmp/test/lib" {
+		if pd.ExternalProjectID == "proj-1" && pd.Directory == "/tmp/test/lib" {
 			seenLib = true
 		}
 	}
@@ -1419,13 +1419,13 @@ func TestCollector_EmptyProjectionsWhenNoRecords(t *testing.T) {
 	if len(req.SessionContexts) != 0 {
 		t.Errorf("heartbeat should have 0 session contexts, got %d", len(req.SessionContexts))
 	}
-	if len(req.ProjectSnapshots) != 0 {
-		t.Errorf("heartbeat should have 0 project snapshots, got %d", len(req.ProjectSnapshots))
+	if len(req.Projects) != 0 {
+		t.Errorf("heartbeat should have 0 project snapshots, got %d", len(req.Projects))
 	}
-	if len(req.ProjectDirectorySnapshots) != 0 {
-		t.Errorf("heartbeat should have 0 project directory snapshots, got %d", len(req.ProjectDirectorySnapshots))
+	if len(req.ProjectDirectories) != 0 {
+		t.Errorf("heartbeat should have 0 project directory snapshots, got %d", len(req.ProjectDirectories))
 	}
-	if len(req.TodoSnapshots) != 0 {
-		t.Errorf("heartbeat should have 0 todo snapshots, got %d", len(req.TodoSnapshots))
+	if len(req.SessionTodos) != 0 {
+		t.Errorf("heartbeat should have 0 todo snapshots, got %d", len(req.SessionTodos))
 	}
 }
