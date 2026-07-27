@@ -76,7 +76,7 @@ type SessionContext struct {
 // by sessions in the batch.
 type ProjectSnapshot struct {
 	ExternalProjectID string `json:"external_project_id"`
-	Title             string `json:"title,omitempty"`
+	Name              string `json:"name,omitempty"`
 	Worktree          string `json:"worktree,omitempty"`
 }
 
@@ -84,28 +84,28 @@ type ProjectSnapshot struct {
 // mapping from the OpenCode source database.
 type ProjectDirectorySnapshot struct {
 	ExternalProjectID string `json:"external_project_id"`
-	Path              string `json:"path"`
+	Directory         string `json:"directory"`
 }
 
 // TodoSnapshot is a batch-level snapshot of an OpenCode todo item for a
 // session in the current batch.
 type TodoSnapshot struct {
 	ExternalSessionID string `json:"external_session_id"`
-	Description       string `json:"description"`
+	Content           string `json:"content"`
 	Status            string `json:"status,omitempty"`
 }
 
 // IngestRequest is the full payload sent in a POST /ingest request.
 type IngestRequest struct {
-	SchemaVersion             string                     `json:"schema_version"`
-	CollectorVersion          string                     `json:"collector_version"`
-	ClientHostname            string                     `json:"client_hostname"`
-	SourceDatabaseID          string                     `json:"source_database_id"`
-	Records                   []IngestRecord             `json:"records"`
-	SessionContexts           []SessionContext            `json:"session_contexts,omitempty"`
-	ProjectSnapshots          []ProjectSnapshot           `json:"project_snapshots,omitempty"`
-	ProjectDirectorySnapshots []ProjectDirectorySnapshot  `json:"project_directory_snapshots,omitempty"`
-	TodoSnapshots             []TodoSnapshot              `json:"todo_snapshots,omitempty"`
+	SchemaVersion     string                    `json:"schema_version"`
+	CollectorVersion  string                    `json:"collector_version"`
+	ClientHostname    string                    `json:"client_hostname"`
+	SourceDatabaseID  string                    `json:"source_database_id"`
+	Records           []IngestRecord            `json:"records"`
+	SessionContexts   []SessionContext           `json:"session_contexts,omitempty"`
+	Projects          []ProjectSnapshot          `json:"projects,omitempty"`
+	ProjectDirectories []ProjectDirectorySnapshot `json:"project_directories,omitempty"`
+	SessionTodos      []TodoSnapshot             `json:"session_todos,omitempty"`
 }
 
 // BatchResult describes the outcome for a single record in an ingest batch.
@@ -146,7 +146,7 @@ func MapToSessionContext(data sqlite.SessionContextData) SessionContext {
 func MapToProjectSnapshot(data sqlite.ProjectData) ProjectSnapshot {
 	return ProjectSnapshot{
 		ExternalProjectID: data.ExternalProjectID,
-		Title:             data.Title,
+		Name:              data.Title,
 		Worktree:          data.Worktree,
 	}
 }
@@ -156,7 +156,7 @@ func MapToProjectSnapshot(data sqlite.ProjectData) ProjectSnapshot {
 func MapToProjectDirectorySnapshot(data sqlite.ProjectDirectoryData) ProjectDirectorySnapshot {
 	return ProjectDirectorySnapshot{
 		ExternalProjectID: data.ExternalProjectID,
-		Path:              data.Path,
+		Directory:         data.Path,
 	}
 }
 
@@ -164,7 +164,7 @@ func MapToProjectDirectorySnapshot(data sqlite.ProjectDirectoryData) ProjectDire
 func MapToTodoSnapshot(data sqlite.TodoData) TodoSnapshot {
 	return TodoSnapshot{
 		ExternalSessionID: data.ExternalSessionID,
-		Description:       data.Description,
+		Content:           data.Description,
 		Status:            data.Status,
 	}
 }
