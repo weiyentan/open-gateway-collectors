@@ -6,6 +6,7 @@ package collector
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"sync"
@@ -30,7 +31,7 @@ type readerFactory func(dbPath string, dbInfo *sqlite.DatabaseInfo) (sqlite.Read
 // usage records from OpenCode source databases to the Gateway.
 type Collector struct {
 	cfg           *config.Config
-	gwClient      *gateway.Client
+	transport     gateway.Transport
 	tracker       *state.Tracker
 	identityStore *identity.Store
 	exclusionGate *exclusion.Gate
@@ -55,8 +56,8 @@ type dbIdentity struct {
 
 // NewCollector wires all components together and returns a Collector ready
 // to run. It resolves the client hostname once at startup via os.Hostname
-// and passes it to the gateway client. Startup details are logged at info
-// level — the bearer token is never logged.
+// and selects the transport (HTTP or Kafka) based on config.Transport.
+// Startup details are logged at info level — the bearer token is never logged.
 func NewCollector(cfg *config.Config, version string) (*Collector, error) {
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -68,6 +69,7 @@ func NewCollector(cfg *config.Config, version string) (*Collector, error) {
 	logger.Info("collector starting",
 		"version", version,
 		"hostname", hostname,
+		"transport", cfg.Transport,
 		"base_url", cfg.BaseURL,
 		"poll_interval", cfg.PollInterval.String(),
 		"heartbeat_interval", cfg.HeartbeatInterval.String(),
@@ -80,9 +82,24 @@ func NewCollector(cfg *config.Config, version string) (*Collector, error) {
 		return nil, fmt.Errorf("creating state tracker: %w", err)
 	}
 
+	var transport gateway.Transport
+	switch cfg.Transport {
+	case "http":
+		transport = gateway.NewClient(cfg.BaseURL, cfg.Token, hostname)
+	case "kafka":
+		transport, err = gateway.NewKafkaClient(cfg.KafkaBrokers, cfg.KafkaTopic, cfg.KafkaClientID, hostname)
+		if err != nil {
+			return nil, fmt.Errorf("create kafka client: %w", err)
+		}
+	default:
+		// Default to HTTP for backward compatibility with tests and embedded
+		// use where Transport is unset (zero value).
+		transport = gateway.NewClient(cfg.BaseURL, cfg.Token, hostname)
+	}
+
 	return &Collector{
 		cfg:           cfg,
-		gwClient:      gateway.NewClient(cfg.BaseURL, cfg.Token, hostname),
+		transport:     transport,
 		tracker:       tracker,
 		identityStore: identity.NewStore(cfg.CursorDir),
 		exclusionGate: exclusion.NewGate(cfg.CursorDir, cfg.ExcludeRecheckInterval),
@@ -123,6 +140,12 @@ func (c *Collector) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			// Close transport if it supports io.Closer (e.g., KafkaClient).
+			if closer, ok := c.transport.(io.Closer); ok {
+				if err := closer.Close(); err != nil {
+					c.logger.Error("closing transport", "error", err)
+				}
+			}
 			c.logger.Info("collector shutting down")
 			return ctx.Err()
 		case <-ticker.C:
@@ -369,7 +392,7 @@ func (c *Collector) sendRecords(
 		TodoSnapshots:              reqTodos,
 	}
 
-	resp, err := c.gwClient.SendBatch(ctx, req)
+	resp, err := c.transport.SendBatch(ctx, req)
 	if err != nil {
 		logger.Error("batch send failed — cursor not updated",
 			"error", err,
@@ -430,7 +453,7 @@ func (c *Collector) maybeSendHeartbeat(ctx context.Context, db dbIdentity, logge
 
 	req := heartbeat.BuildHeartbeat(db.id, c.version, c.hostname)
 
-	resp, err := c.gwClient.SendBatch(ctx, req)
+	resp, err := c.transport.SendBatch(ctx, req)
 	if err != nil {
 		logger.Warn("heartbeat send failed", "error", err)
 		return

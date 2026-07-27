@@ -12,7 +12,7 @@ func TestLoadDefaults(t *testing.T) {
 	defer restoreEnv(saved)
 	clearEnv()
 
-	// Set required fields.
+	// Set required fields for http transport (the default).
 	t.Setenv("GATEWAY_COLLECTOR_TOKEN", "test-token")
 	t.Setenv("GATEWAY_BASE_URL", "http://localhost:8080")
 
@@ -21,12 +21,6 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatalf("Load() returned unexpected error: %v", err)
 	}
 
-	if cfg.Token != "test-token" {
-		t.Errorf("Token = %q, want %q", cfg.Token, "test-token")
-	}
-	if cfg.BaseURL != "http://localhost:8080" {
-		t.Errorf("BaseURL = %q, want %q", cfg.BaseURL, "http://localhost:8080")
-	}
 	if cfg.PollInterval != 60*time.Second {
 		t.Errorf("PollInterval = %v, want %v", cfg.PollInterval, 60*time.Second)
 	}
@@ -39,6 +33,18 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.LogLevel != "info" {
 		t.Errorf("LogLevel = %q, want %q", cfg.LogLevel, "info")
 	}
+	if cfg.Transport != "http" {
+		t.Errorf("Transport = %q, want %q", cfg.Transport, "http")
+	}
+	if cfg.Token != "test-token" {
+		t.Errorf("Token = %q, want %q", cfg.Token, "test-token")
+	}
+	if cfg.BaseURL != "http://localhost:8080" {
+		t.Errorf("BaseURL = %q, want %q", cfg.BaseURL, "http://localhost:8080")
+	}
+	if cfg.KafkaTopic != "opencode-usage" {
+		t.Errorf("KafkaTopic = %q, want %q", cfg.KafkaTopic, "opencode-usage")
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -46,6 +52,7 @@ func TestLoadOverrides(t *testing.T) {
 	defer restoreEnv(saved)
 	clearEnv()
 
+	t.Setenv("GATEWAY_COLLECTOR_TRANSPORT", "http")
 	t.Setenv("GATEWAY_COLLECTOR_TOKEN", "override-token")
 	t.Setenv("GATEWAY_BASE_URL", "https://gateway.example.com")
 	t.Setenv("GATEWAY_COLLECTOR_POLL_INTERVAL", "30s")
@@ -55,6 +62,9 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv("GATEWAY_COLLECTOR_SQLITE_DIR", "/custom/sqlite")
 	t.Setenv("GATEWAY_COLLECTOR_LOG_LEVEL", "debug")
 	t.Setenv("GATEWAY_COLLECTOR_CURSOR_DIR", "/custom/cursors")
+	t.Setenv("GATEWAY_KAFKA_BROKERS", "kafka1:9092,kafka2:9092")
+	t.Setenv("GATEWAY_KAFKA_TOPIC", "custom-usage")
+	t.Setenv("GATEWAY_KAFKA_CLIENT_ID", "my-collector")
 
 	cfg, err := Load()
 	if err != nil {
@@ -88,6 +98,18 @@ func TestLoadOverrides(t *testing.T) {
 	if cfg.CursorDir != "/custom/cursors" {
 		t.Errorf("CursorDir = %q, want %q", cfg.CursorDir, "/custom/cursors")
 	}
+	if cfg.Transport != "http" {
+		t.Errorf("Transport = %q, want %q", cfg.Transport, "http")
+	}
+	if len(cfg.KafkaBrokers) != 2 || cfg.KafkaBrokers[0] != "kafka1:9092" || cfg.KafkaBrokers[1] != "kafka2:9092" {
+		t.Errorf("KafkaBrokers = %v, want [kafka1:9092 kafka2:9092]", cfg.KafkaBrokers)
+	}
+	if cfg.KafkaTopic != "custom-usage" {
+		t.Errorf("KafkaTopic = %q, want %q", cfg.KafkaTopic, "custom-usage")
+	}
+	if cfg.KafkaClientID != "my-collector" {
+		t.Errorf("KafkaClientID = %q, want %q", cfg.KafkaClientID, "my-collector")
+	}
 }
 
 func TestLoadMissingToken(t *testing.T) {
@@ -95,7 +117,8 @@ func TestLoadMissingToken(t *testing.T) {
 	defer restoreEnv(saved)
 	clearEnv()
 
-	// Set BaseURL but not Token.
+	// Set BaseURL and transport=http but not Token.
+	t.Setenv("GATEWAY_COLLECTOR_TRANSPORT", "http")
 	t.Setenv("GATEWAY_BASE_URL", "http://localhost:8080")
 
 	_, err := Load()
@@ -109,7 +132,8 @@ func TestLoadMissingBaseURL(t *testing.T) {
 	defer restoreEnv(saved)
 	clearEnv()
 
-	// Set Token but not BaseURL.
+	// Set Token and transport=http but not BaseURL.
+	t.Setenv("GATEWAY_COLLECTOR_TRANSPORT", "http")
 	t.Setenv("GATEWAY_COLLECTOR_TOKEN", "test-token")
 
 	_, err := Load()
@@ -204,6 +228,10 @@ func saveEnv() map[string]string {
 		"GATEWAY_COLLECTOR_SQLITE_DIR",
 		"GATEWAY_COLLECTOR_LOG_LEVEL",
 		"GATEWAY_COLLECTOR_CURSOR_DIR",
+		"GATEWAY_COLLECTOR_TRANSPORT",
+		"GATEWAY_KAFKA_BROKERS",
+		"GATEWAY_KAFKA_TOPIC",
+		"GATEWAY_KAFKA_CLIENT_ID",
 	}
 	saved := make(map[string]string, len(keys))
 	for _, k := range keys {
@@ -235,6 +263,10 @@ func clearEnv() {
 		"GATEWAY_COLLECTOR_SQLITE_DIR",
 		"GATEWAY_COLLECTOR_LOG_LEVEL",
 		"GATEWAY_COLLECTOR_CURSOR_DIR",
+		"GATEWAY_COLLECTOR_TRANSPORT",
+		"GATEWAY_KAFKA_BROKERS",
+		"GATEWAY_KAFKA_TOPIC",
+		"GATEWAY_KAFKA_CLIENT_ID",
 	}
 	for _, k := range keys {
 		os.Unsetenv(k)
