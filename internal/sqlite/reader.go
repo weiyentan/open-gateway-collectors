@@ -238,15 +238,18 @@ func (r *OpenCodeReader) ReadProjectData(projectIDs []string) ([]ProjectData, er
 	}
 
 	// Determine available columns.
+	hasName := slices.Contains(r.dbInfo.ProjectColumns, "name")
 	hasTitle := slices.Contains(r.dbInfo.ProjectColumns, "title")
 	hasWorktree := slices.Contains(r.dbInfo.ProjectColumns, "worktree")
 
-	// Build SELECT expressions.
+	// Build SELECT expressions. Prefer name, fall back to title, empty if neither.
 	selectCols := []string{"p.id"}
-	if hasTitle {
+	if hasName {
+		selectCols = append(selectCols, "p.name")
+	} else if hasTitle {
 		selectCols = append(selectCols, "p.title")
 	} else {
-		selectCols = append(selectCols, "'' as title")
+		selectCols = append(selectCols, "'' as name")
 	}
 	if hasWorktree {
 		selectCols = append(selectCols, "p.worktree")
@@ -272,13 +275,13 @@ func (r *OpenCodeReader) ReadProjectData(projectIDs []string) ([]ProjectData, er
 
 	var result []ProjectData
 	for rows.Next() {
-		var id, title, worktree sql.NullString
-		if err := rows.Scan(&id, &title, &worktree); err != nil {
+		var id, nameStr, worktree sql.NullString
+		if err := rows.Scan(&id, &nameStr, &worktree); err != nil {
 			return nil, fmt.Errorf("scanning project data: %w", err)
 		}
 		result = append(result, ProjectData{
 			ExternalProjectID: id.String,
-			Title:             title.String,
+			Name:              nameStr.String,
 			Worktree:          worktree.String,
 		})
 	}

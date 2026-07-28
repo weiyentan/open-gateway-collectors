@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -680,7 +681,7 @@ func openReaderWithSchema(t *testing.T, dbPath string) *OpenCodeReader {
 }
 
 type projectRow struct {
-	id, title, worktree string
+	id, title, name, worktree string
 }
 
 type projectDirRow struct {
@@ -689,6 +690,52 @@ type projectDirRow struct {
 
 type todoRow struct {
 	sessionID, description, status string
+}
+
+// createTestDBWithCustomProjectTable creates a test database with a
+// caller-defined project table schema. This allows tests to control which
+// columns exist (name, title, worktree, etc.) independently.
+func createTestDBWithCustomProjectTable(t *testing.T, sessions []sessionRow, messages []messageRow, createTable string, projectValues [][]string) string {
+	t.Helper()
+
+	dbPath := createTestDB(t, sessions, messages)
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("failed to reopen test db: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(createTable); err != nil {
+		t.Fatalf("failed to create custom project table: %v", err)
+	}
+
+	for _, row := range projectValues {
+		placeholders := make([]string, len(row))
+		args := make([]any, len(row))
+		for j, val := range row {
+			placeholders[j] = "?"
+			args[j] = val
+		}
+		query := fmt.Sprintf("INSERT INTO project VALUES (%s)", joinStr(placeholders))
+		if _, err := db.Exec(query, args...); err != nil {
+			t.Fatalf("failed to insert custom project row: %v", err)
+		}
+	}
+
+	return dbPath
+}
+
+// joinStr joins string slices with comma separators for SQL query building.
+func joinStr(parts []string) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	result := parts[0]
+	for i := 1; i < len(parts); i++ {
+		result += ", " + parts[i]
+	}
+	return result
 }
 
 // ---------------------------------------------------------------------------
@@ -805,8 +852,8 @@ func TestReadProjectData_ReadsExisting(t *testing.T) {
 	if data[0].ExternalProjectID != "proj-1" {
 		t.Errorf("ExternalProjectID = %q, want %q", data[0].ExternalProjectID, "proj-1")
 	}
-	if data[0].Title != "Test Project" {
-		t.Errorf("Title = %q, want %q", data[0].Title, "Test Project")
+	if data[0].Name != "Test Project" {
+		t.Errorf("Name = %q, want %q", data[0].Name, "Test Project")
 	}
 	if data[0].Worktree != "/tmp/test" {
 		t.Errorf("Worktree = %q, want %q", data[0].Worktree, "/tmp/test")
@@ -830,6 +877,122 @@ func TestReadProjectData_TableNotExist(t *testing.T) {
 	}
 	if len(data) != 0 {
 		t.Errorf("expected 0 projects when table doesn't exist, got %d", len(data))
+	}
+}
+
+func TestReadProjectData_ReadsNameColumn(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", agent: "claude", model: ""},
+	}
+
+	// Project table with name column (no title).
+	dbPath := createTestDBWithCustomProjectTable(t, sessions, nil,
+		`CREATE TABLE project (
+			id TEXT PRIMARY KEY,
+			name TEXT,
+			worktree TEXT
+		)`,
+		[][]string{
+			{"proj-1", "Name Project", "/tmp/test"},
+		},
+	)
+
+	r := openReaderWithSchema(t, dbPath)
+	defer r.Close()
+
+	data, err := r.ReadProjectData([]string{"proj-1"})
+	if err != nil {
+		t.Fatalf("ReadProjectData failed: %v", err)
+	}
+	if len(data) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(data))
+	}
+	if data[0].ExternalProjectID != "proj-1" {
+		t.Errorf("ExternalProjectID = %q, want %q", data[0].ExternalProjectID, "proj-1")
+	}
+	if data[0].Name != "Name Project" {
+		t.Errorf("Name = %q, want %q", data[0].Name, "Name Project")
+	}
+	if data[0].Worktree != "/tmp/test" {
+		t.Errorf("Worktree = %q, want %q", data[0].Worktree, "/tmp/test")
+	}
+}
+
+func TestReadProjectData_FallsBackToTitle(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", agent: "claude", model: ""},
+	}
+
+	// Project table with title column (no name).
+	dbPath := createTestDBWithCustomProjectTable(t, sessions, nil,
+		`CREATE TABLE project (
+			id TEXT PRIMARY KEY,
+			title TEXT,
+			worktree TEXT
+		)`,
+		[][]string{
+			{"proj-1", "Title Project", "/tmp/other"},
+		},
+	)
+
+	r := openReaderWithSchema(t, dbPath)
+	defer r.Close()
+
+	data, err := r.ReadProjectData([]string{"proj-1"})
+	if err != nil {
+		t.Fatalf("ReadProjectData failed: %v", err)
+	}
+	if len(data) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(data))
+	}
+	if data[0].ExternalProjectID != "proj-1" {
+		t.Errorf("ExternalProjectID = %q, want %q", data[0].ExternalProjectID, "proj-1")
+	}
+	if data[0].Name != "Title Project" {
+		t.Errorf("Name (fallback from title) = %q, want %q", data[0].Name, "Title Project")
+	}
+	if data[0].Worktree != "/tmp/other" {
+		t.Errorf("Worktree = %q, want %q", data[0].Worktree, "/tmp/other")
+	}
+}
+
+func TestReadProjectData_NoNameNoTitle(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", agent: "claude", model: ""},
+	}
+
+	// Project table with neither name nor title.
+	dbPath := createTestDBWithCustomProjectTable(t, sessions, nil,
+		`CREATE TABLE project (
+			id TEXT PRIMARY KEY,
+			worktree TEXT
+		)`,
+		[][]string{
+			{"proj-1", "/tmp/minimal"},
+		},
+	)
+
+	r := openReaderWithSchema(t, dbPath)
+	defer r.Close()
+
+	data, err := r.ReadProjectData([]string{"proj-1"})
+	if err != nil {
+		t.Fatalf("ReadProjectData failed: %v", err)
+	}
+	if len(data) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(data))
+	}
+	if data[0].ExternalProjectID != "proj-1" {
+		t.Errorf("ExternalProjectID = %q, want %q", data[0].ExternalProjectID, "proj-1")
+	}
+	if data[0].Name != "" {
+		t.Errorf("Name should be empty when neither name nor title column exists, got %q", data[0].Name)
+	}
+	if data[0].Worktree != "/tmp/minimal" {
+		t.Errorf("Worktree = %q, want %q", data[0].Worktree, "/tmp/minimal")
 	}
 }
 

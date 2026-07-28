@@ -146,7 +146,7 @@ func MapToSessionContext(data sqlite.SessionContextData) SessionContext {
 func MapToProjectSnapshot(data sqlite.ProjectData) ProjectSnapshot {
 	return ProjectSnapshot{
 		ExternalProjectID: data.ExternalProjectID,
-		Name:              data.Title,
+		Name:              data.Name,
 		Worktree:          data.Worktree,
 	}
 }
