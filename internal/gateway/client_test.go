@@ -535,6 +535,92 @@ func TestMapToIngestRecord_LargeCost(t *testing.T) {
 	}
 }
 
+func TestMapToIngestRecord_V12EnrichmentFields(t *testing.T) {
+	now := time.Date(2025, 7, 15, 14, 30, 0, 0, time.UTC)
+	record := UsageRecord{
+		SourceRecordID:   "rec-v12",
+		SessionID:        "sess-v12",
+		Model:            "claude-sonnet-4",
+		ProviderID:       "anthropic",
+		Mode:             "chat",
+		Agent:            "code-editor-mid",
+		ProjectID:        "proj-telemetry",
+		WorkspaceID:      "ws-analytics",
+		ParentSessionID:  "parent-sess-v12",
+		ReasoningTokens:  200,
+		FinishReason:     "stop",
+		InputTokens:      500,
+		OutputTokens:     300,
+		TokensCacheRead:  100,
+		TokensCacheWrite: 50,
+		EstimatedCostUSD: 0.0125,
+		OccurredAt:       now,
+	}
+
+	result := MapToIngestRecord(record)
+
+	// Verify all v1.2 session token enrichment fields.
+	if result.InputTokens != 500 {
+		t.Errorf("InputTokens = %d, want %d", result.InputTokens, 500)
+	}
+	if result.OutputTokens != 300 {
+		t.Errorf("OutputTokens = %d, want %d", result.OutputTokens, 300)
+	}
+	if result.ReasoningTokens != 200 {
+		t.Errorf("ReasoningTokens = %d, want %d", result.ReasoningTokens, 200)
+	}
+	if result.CacheReadTokens != 100 {
+		t.Errorf("CacheReadTokens = %d, want %d", result.CacheReadTokens, 100)
+	}
+	if result.CacheWriteTokens != 50 {
+		t.Errorf("CacheWriteTokens = %d, want %d", result.CacheWriteTokens, 50)
+	}
+	// cached_tokens must equal cache_read_tokens + cache_write_tokens.
+	if result.CachedTokens != 150 {
+		t.Errorf("CachedTokens = %d, want %d (cache_read + cache_write)", result.CachedTokens, 150)
+	}
+	if result.ProjectID != "proj-telemetry" {
+		t.Errorf("ProjectID = %q, want %q", result.ProjectID, "proj-telemetry")
+	}
+	if result.WorkspaceID != "ws-analytics" {
+		t.Errorf("WorkspaceID = %q, want %q", result.WorkspaceID, "ws-analytics")
+	}
+	if result.Agent != "code-editor-mid" {
+		t.Errorf("Agent = %q, want %q", result.Agent, "code-editor-mid")
+	}
+	if result.ParentSessionID != "parent-sess-v12" {
+		t.Errorf("ParentSessionID = %q, want %q", result.ParentSessionID, "parent-sess-v12")
+	}
+	if result.FinishReason != "stop" {
+		t.Errorf("FinishReason = %q, want %q", result.FinishReason, "stop")
+	}
+
+	// Marshal to JSON and verify all v1.2 field names are present in the wire format.
+	body, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	raw := string(body)
+
+	enrichmentFields := []string{
+		"input_tokens",
+		"output_tokens",
+		"reasoning_tokens",
+		"cache_read_tokens",
+		"cache_write_tokens",
+		"cached_tokens",
+		"project_id",
+		"workspace_id",
+		"agent",
+		"parent_session_id",
+	}
+	for _, field := range enrichmentFields {
+		if !strings.Contains(raw, field) {
+			t.Errorf("v1.2 enrichment field %q not found in JSON payload: %s", field, raw)
+		}
+	}
+}
+
 func TestNewClient_SetsDefaults(t *testing.T) {
 	client := NewClient("http://example.com", "tok", "h")
 	if client.baseURL != "http://example.com" {
@@ -708,7 +794,7 @@ func TestMapToTodoSnapshot_EmptyStatus(t *testing.T) {
 func TestIngestRequest_JSONSerialization_WithProjections(t *testing.T) {
 	cost := "0.0035"
 	req := IngestRequest{
-		SchemaVersion:    "1.1",
+		SchemaVersion:    "1.2",
 		CollectorVersion: "0.1.0",
 		ClientHostname:   "test-host",
 		SourceDatabaseID: "db-1",
@@ -788,7 +874,7 @@ func TestIngestRequest_JSONSerialization_WithProjections(t *testing.T) {
 
 func TestIngestRequest_JSONSerialization_EmptyProjections(t *testing.T) {
 	req := IngestRequest{
-		SchemaVersion:    "1.1",
+		SchemaVersion:    "1.2",
 		CollectorVersion: "0.1.0",
 		ClientHostname:   "test-host",
 		SourceDatabaseID: "db-1",
