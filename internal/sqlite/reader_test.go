@@ -681,7 +681,7 @@ func openReaderWithSchema(t *testing.T, dbPath string) *OpenCodeReader {
 }
 
 type projectRow struct {
-	id, title, name, worktree string
+	id, title, worktree string
 }
 
 type projectDirRow struct {
