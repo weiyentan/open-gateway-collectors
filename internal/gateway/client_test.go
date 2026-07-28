@@ -626,7 +626,7 @@ func TestMapToSessionContext_EmptyFields(t *testing.T) {
 func TestMapToProjectSnapshot_AllFields(t *testing.T) {
 	data := sqlite.ProjectData{
 		ExternalProjectID: "proj-1",
-		Title:             "My Project",
+		Name:              "My Project",
 		Worktree:          "/path/to/repo",
 	}
 	result := MapToProjectSnapshot(data)

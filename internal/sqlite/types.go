@@ -97,7 +97,7 @@ type SessionContextData struct {
 // correspond to columns in the project table.
 type ProjectData struct {
 	ExternalProjectID string // project.id
-	Title             string // project.title
+	Name              string // project.name (or project.title in older databases)
 	Worktree          string // project.worktree (path to local checkout)
 }
 

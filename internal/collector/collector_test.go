@@ -1130,7 +1130,7 @@ func TestCollector_IncludesProjectionsInRequest(t *testing.T) {
 			{ExternalSessionID: "sess-rec-2", Agent: "gpt", ProjectID: "proj-1", Model: "gpt-4o"},
 		},
 		projects: []sqlite.ProjectData{
-			{ExternalProjectID: "proj-1", Title: "Test Project", Worktree: "/tmp/test"},
+			{ExternalProjectID: "proj-1", Name: "Test Project", Worktree: "/tmp/test"},
 		},
 		projectDirs: []sqlite.ProjectDirectoryData{
 			{ExternalProjectID: "proj-1", Path: "/tmp/test/src"},
@@ -1293,7 +1293,7 @@ func TestCollector_DedupProjectDirectoriesWithinBatch(t *testing.T) {
 			{ExternalSessionID: "sess-rec-2", ProjectID: "proj-1"},
 		},
 		projects: []sqlite.ProjectData{
-			{ExternalProjectID: "proj-1", Title: "Test", Worktree: "/tmp/test"},
+			{ExternalProjectID: "proj-1", Name: "Test", Worktree: "/tmp/test"},
 		},
 	}
 
