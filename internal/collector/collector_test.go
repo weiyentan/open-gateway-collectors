@@ -2578,6 +2578,85 @@ func TestCollector_ReplayFailureRewindSurfacesSetCursorError(t *testing.T) {
 	}
 }
 
+// TestCollector_ReplayCompletionSurfacesSetCursorError verifies that when a
+// replay completes successfully (partial-batch path) but the completion-path
+// SetCursor fails, the error is surfaced via logger.Error instead of being
+// swallowed. A swallowed error leaves the persisted cursor unchanged, so a
+// restart without replay may re-read records that were already ingested.
+func TestCollector_ReplayCompletionSurfacesSetCursorError(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.BatchLimit = 100 // large batch so partial-batch completion fires
+	cfg.Replay = true
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	// Zero replaySince so all records are read regardless of wall-clock time.
+	c.replaySince = time.Time{}
+
+	// Transport always succeeds — we want the completion path, not the rewind.
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "replay-complete-fail-001",
+		AcceptedCount: 2,
+	})
+	c.transport = mockTransport
+
+	// Route collector logs to a buffer so we can assert on the completion
+	// error log line.
+	var logBuf bytes.Buffer
+	c.logger = slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	// Pre-existing stored cursor ahead of the records.
+	initialCursor := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := c.tracker.SetCursor(dbPath, initialCursor); err != nil {
+		t.Fatalf("SetCursor: %v", err)
+	}
+
+	// 2 records, batch limit 100 → all in one batch → partial-batch
+	// completion fires after sendRecords succeeds.
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2"}, now),
+	}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+
+	// Force the completion-path SetCursor to fail: replace the state file
+	// with a directory so the save() WriteFile fails with "is a directory".
+	stateFilePath := filepath.Join(dir, ".collector-state")
+	if err := os.RemoveAll(stateFilePath); err != nil {
+		t.Fatalf("RemoveAll state file: %v", err)
+	}
+	if err := os.Mkdir(stateFilePath, 0o755); err != nil {
+		t.Fatalf("Mkdir state file path: %v", err)
+	}
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	// The completion-path SetCursor error must be logged, not swallowed.
+	if !strings.Contains(logBuf.String(), "failed to persist cursor after replay completion") {
+		t.Errorf("expected completion SetCursor error to be logged, got:\n%s", logBuf.String())
+	}
+
+	// Replay marked complete (in-memory state updated despite SetCursor failure).
+	if !c.replayCompleted[dbPath] {
+		t.Error("replayCompleted should be true after successful replay (SetCursor failure does not block completion)")
+	}
+}
+
 // TestCollector_ReplayFailureRewindClampsWhenReplaySinceAfterStoredCursor verifies
 // PR #47 finding E13: when replay batch send fails AND replaySince is after the
 // stored cursor, the failure-path rewind must clamp to the stored cursor instead of

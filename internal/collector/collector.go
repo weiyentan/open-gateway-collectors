@@ -442,7 +442,9 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 				} else if finalCursor.Before(cursor) {
 					finalCursor = cursor // never regress
 				}
-				_ = c.tracker.SetCursor(db.path, finalCursor)
+				if err := c.tracker.SetCursor(db.path, finalCursor); err != nil {
+					logger.Error("failed to persist cursor after replay completion; restart without replay may re-read the window", "error", err)
+				}
 				c.replayCompleted[db.path] = true
 			}
 			// Send heartbeat regardless of mode so zero-record databases
@@ -520,7 +522,9 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 			} else if finalCursor.Before(cursor) {
 				finalCursor = cursor // never regress
 			}
-			_ = c.tracker.SetCursor(db.path, finalCursor)
+			if err := c.tracker.SetCursor(db.path, finalCursor); err != nil {
+				logger.Error("failed to persist cursor after replay completion; restart without replay may re-read the window", "error", err)
+			}
 			c.replayCompleted[db.path] = true
 			return
 		}
