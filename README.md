@@ -43,6 +43,8 @@ Each collector:
 | `GATEWAY_COLLECTOR_SQLITE_DIR` | No | `~/.local/share/opencode/` (Linux) / `%APPDATA%/OpenCode/` (Windows) | Directory containing OpenCode SQLite databases |
 | `GATEWAY_COLLECTOR_LOG_LEVEL` | No | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
 | `GATEWAY_COLLECTOR_CURSOR_DIR` | No | Working directory | Directory for cursor state file persistence |
+| `GATEWAY_COLLECTOR_REPLAY` | No | `false` | Enable replay mode — re-read and re-send all historical records past the stored cursor |
+| `GATEWAY_COLLECTOR_REPLAY_SINCE` | No | `0` (full history) | Bounds replay to records newer than `time.Now().Add(-duration)`. Accepts Go duration strings (e.g. `720h`, `30m`). Zero means full history. Only used when Replay is enabled. |
 
 ## Quick Start
 
@@ -153,6 +155,7 @@ This project requires Go 1.25 or later. The module path is `github.com/opencode-
 | Flag | Description |
 |------|-------------|
 | `-version` | Print the collector version (`dev` for development builds) and exit |
+| `-replay` | Enable replay mode — re-read and re-send all historical records past the stored cursor. Overrides the `GATEWAY_COLLECTOR_REPLAY` env var. Use with `GATEWAY_COLLECTOR_REPLAY_SINCE` to bound the replay window. |
 
 ### Dependencies
 

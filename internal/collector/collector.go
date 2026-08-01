@@ -45,6 +45,10 @@ type Collector struct {
 	seedOnce    sync.Once
 
 	newReader readerFactory
+
+	// replaySince is the computed effective since time for replay mode.
+	// Zero time means full history. Only meaningful when cfg.Replay is true.
+	replaySince time.Time
 }
 
 // dbIdentity holds the resolved identity for a single discovered database.
@@ -76,6 +80,26 @@ func NewCollector(cfg *config.Config, version string) (*Collector, error) {
 		"batch_limit", cfg.BatchLimit,
 		"log_level", cfg.LogLevel,
 	)
+
+	// Compute the replay since time from config. Zero ReplaySince means full
+	// history (zero time). A non-zero value means replay records newer than
+	// time.Now().Add(-ReplaySince).
+	var replaySince time.Time
+	if cfg.Replay && cfg.ReplaySince > 0 {
+		replaySince = time.Now().Add(-cfg.ReplaySince)
+	}
+
+	// Log replay configuration if enabled.
+	if cfg.Replay {
+		if cfg.ReplaySince > 0 {
+			logger.Info("replay mode enabled",
+				"replay_since", replaySince.Format(time.RFC3339),
+				"replay_since_duration", cfg.ReplaySince.String(),
+			)
+		} else {
+			logger.Info("replay mode enabled — full history")
+		}
+	}
 
 	tracker, err := state.NewTracker(cfg.CursorDir)
 	if err != nil {
@@ -109,6 +133,7 @@ func NewCollector(cfg *config.Config, version string) (*Collector, error) {
 		lastSuccess:   make(map[string]time.Time),
 		batchLimit:    cfg.BatchLimit,
 		newReader:     defaultReaderFactory,
+		replaySince:   replaySince,
 	}, nil
 }
 
@@ -312,6 +337,12 @@ func (c *Collector) resolveDatabases() ([]dbIdentity, error) {
 // It reads new records since the last cursor, sends them to the Gateway,
 // or sends a heartbeat if the database is idle. The cursor is only updated
 // after a successful POST — failed POSTs are retried on the next iteration.
+//
+// In replay mode (cfg.Replay == true), the effective since time is
+// replaySince (which may be zero for full history) instead of the stored
+// cursor, and processDatabase loops to read and send all matching records
+// in batches up to batchLimit. The cursor advances per batch, so if replay
+// is interrupted, subsequent runs resume from the last cursor.
 func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 	logger := c.logger.With(
 		"source_database_id", db.id,
@@ -324,6 +355,17 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 		return
 	}
 
+	// Determine the effective since time. In replay mode, the stored cursor
+	// is ignored — we re-read from replaySince (full history if zero).
+	effectiveSince := cursor
+	if c.cfg.Replay {
+		effectiveSince = c.replaySince
+		logger.Info("replay active — reading from effective since",
+			"effective_since", effectiveSince.Format(time.RFC3339),
+			"stored_cursor", cursor.Format(time.RFC3339),
+		)
+	}
+
 	reader, closeFn, err := c.newReader(db.path, db.dbInfo)
 	if err != nil {
 		logger.Error("failed to open reader", "error", err)
@@ -331,13 +373,22 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 	}
 	defer closeFn()
 
-	records, err := reader.ReadRecords(cursor, c.batchLimit)
-	if err != nil {
-		logger.Error("failed to read records", "error", err)
-		return
-	}
+	// Replay loop: in replay mode, keep reading batches until no more
+	// records are returned. In normal mode, this runs exactly once.
+	for {
+		records, err := reader.ReadRecords(effectiveSince, c.batchLimit)
+		if err != nil {
+			logger.Error("failed to read records", "error", err)
+			return
+		}
 
-	if len(records) > 0 {
+		if len(records) == 0 {
+			if !c.cfg.Replay {
+				c.maybeSendHeartbeat(ctx, db, logger)
+			}
+			return
+		}
+
 		// Extract unique session IDs and project IDs from the records
 		// for projection reads.
 		sessionIDs := uniqueSessionIDs(records)
@@ -349,8 +400,33 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 		todos, _ := reader.ReadTodoData(sessionIDs)
 
 		c.sendRecords(ctx, db, records, sessionCtxs, projects, projectDirs, todos, logger)
-	} else {
-		c.maybeSendHeartbeat(ctx, db, logger)
+
+		// In replay mode, advance effectiveSince to the last record's
+		// time_updated and loop if the batch was full (more records may
+		// exist). In normal mode, exit after one batch.
+		if !c.cfg.Replay {
+			return
+		}
+
+		// If fewer records than the batch limit were returned, we've read
+		// everything — done with replay for this database.
+		if len(records) < c.batchLimit {
+			logger.Info("replay complete for database",
+				"records_sent_in_final_batch", len(records),
+			)
+			return
+		}
+
+		// Advance effectiveSince past the last record in this batch to
+		// read the next batch. Records are in ASC time_updated order,
+		// so we take the max from this batch.
+		maxOccurred := records[0].OccurredAt
+		for i := 1; i < len(records); i++ {
+			if records[i].OccurredAt.After(maxOccurred) {
+				maxOccurred = records[i].OccurredAt
+			}
+		}
+		effectiveSince = maxOccurred
 	}
 }
 
