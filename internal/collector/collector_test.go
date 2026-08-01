@@ -1,14 +1,17 @@
 package collector
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -2254,6 +2257,324 @@ func TestCollector_ReplayCursorOnlyPersistedOnCompletion(t *testing.T) {
 	// replayCompleted should be set.
 	if !c.replayCompleted[dbPath] {
 		t.Error("replayCompleted should be true after successful replay")
+	}
+}
+
+// TestCollector_ReplayCompletionClampsCursorWhenReplaySinceAfterStoredCursor
+// verifies PR #47 finding 1 on the partial-batch completion path: when the
+// replay window starts AFTER the pre-replay stored cursor, the persisted
+// cursor must be clamped back to the stored cursor. Records in
+// (storedCursor, replaySince] were never previously ingested and were not
+// re-read by the replay — advancing the cursor past them would silently
+// skip them forever in normal incremental mode.
+func TestCollector_ReplayCompletionClampsCursorWhenReplaySinceAfterStoredCursor(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "replay-clamp-001",
+		AcceptedCount: 3,
+	})
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.BatchLimit = 10 // larger than record count: single partial batch
+	cfg.Replay = true
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+	c.transport = mockTransport
+
+	// Stored cursor is OLDER than replaySince: records in
+	// (storedCursor, replaySince] were never ingested and not re-read.
+	storedCursor := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := c.tracker.SetCursor(dbPath, storedCursor); err != nil {
+		t.Fatalf("SetCursor: %v", err)
+	}
+
+	// replaySince after stored cursor but before the records.
+	c.replaySince = time.Date(2025, 7, 1, 0, 0, 0, 0, time.UTC)
+
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2", "rec-3"}, now),
+	}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	// All 3 records were replayed in a single batch.
+	if mockTransport.CallCount() != 1 {
+		t.Fatalf("expected 1 batch, got %d", mockTransport.CallCount())
+	}
+
+	// Cursor must stay at the stored cursor, NOT advance to the last
+	// record's time (now+2s): records in (2024-01-01, 2025-07-01] were
+	// never ingested and must remain readable by normal incremental mode.
+	cursor, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	if !cursor.Equal(storedCursor) {
+		t.Errorf("cursor = %v, want stored cursor %v (bug: replay completion skipped records in (storedCursor, replaySince])", cursor, storedCursor)
+	}
+
+	// Replay still completed — the latch must be set.
+	if !c.replayCompleted[dbPath] {
+		t.Error("replayCompleted should be true after successful replay")
+	}
+}
+
+// TestCollector_ReplayCompletionEmptyBatchClampsCursorWhenReplaySinceAfterStoredCursor
+// verifies PR #47 finding 1 on the empty-batch completion path: when the
+// replay window returns no records and starts AFTER the stored cursor, the
+// persisted cursor must be clamped back to the stored cursor so records in
+// (storedCursor, replaySince] remain readable by normal incremental mode.
+func TestCollector_ReplayCompletionEmptyBatchClampsCursorWhenReplaySinceAfterStoredCursor(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "replay-clamp-empty-001",
+		AcceptedCount: 0,
+	})
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.Replay = true
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+	c.transport = mockTransport
+
+	// Stored cursor older than replaySince.
+	storedCursor := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := c.tracker.SetCursor(dbPath, storedCursor); err != nil {
+		t.Fatalf("SetCursor: %v", err)
+	}
+
+	// replaySince after the stored cursor; ALL records sit BEFORE
+	// replaySince, so the replay window is empty.
+	c.replaySince = time.Date(2025, 7, 1, 0, 0, 0, 0, time.UTC)
+
+	// Records at 2025-06-01 — before replaySince (2025-07-01), so the
+	// replay pass reads zero records and takes the empty-batch path.
+	oldRecTime := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2", "rec-3"}, oldRecTime),
+	}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	// No records were sent (empty replay window, no prior success for
+	// heartbeat eligibility).
+	if mockTransport.CallCount() != 0 {
+		t.Fatalf("expected 0 batches, got %d", mockTransport.CallCount())
+	}
+
+	// Cursor must stay at the stored cursor, NOT jump to replaySince
+	// (2025-07-01): records in (2024-01-01, 2025-07-01] were never
+	// ingested and must remain readable by normal incremental mode.
+	cursor, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	if !cursor.Equal(storedCursor) {
+		t.Errorf("cursor = %v, want stored cursor %v (bug: empty-batch completion skipped records in (storedCursor, replaySince])", cursor, storedCursor)
+	}
+
+	// Replay still completed — the latch must be set.
+	if !c.replayCompleted[dbPath] {
+		t.Error("replayCompleted should be true after successful replay")
+	}
+}
+
+// TestCollector_ReplayCompletionNeverRegressesCursor verifies PR #47
+// finding 1's "never regress" clause: when the pre-replay stored cursor is
+// AHEAD of everything the replay re-read (e.g. full-history replay against
+// a database whose cursor is already past the records), the completion
+// cursor must NOT move backwards to the last replayed record's time.
+func TestCollector_ReplayCompletionNeverRegressesCursor(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "replay-no-regress-001",
+		AcceptedCount: 3,
+	})
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.Replay = true
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+	c.transport = mockTransport
+
+	// Stored cursor AHEAD of all records. replaySince stays zero
+	// (full history), so the replay re-reads and re-sends older records.
+	futureCursor := time.Date(2025, 12, 31, 0, 0, 0, 0, time.UTC)
+	if err := c.tracker.SetCursor(dbPath, futureCursor); err != nil {
+		t.Fatalf("SetCursor: %v", err)
+	}
+
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2", "rec-3"}, now),
+	}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	// The replay sent the older records…
+	if mockTransport.CallCount() != 1 {
+		t.Fatalf("expected 1 batch, got %d", mockTransport.CallCount())
+	}
+
+	// …but the persisted cursor must NOT regress to the last replayed
+	// record's time (now+2s) — it stays at the stored cursor.
+	cursor, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	if !cursor.Equal(futureCursor) {
+		t.Errorf("cursor = %v, want stored cursor %v (bug: replay completion regressed the cursor)", cursor, futureCursor)
+	}
+
+	if !c.replayCompleted[dbPath] {
+		t.Error("replayCompleted should be true after successful replay")
+	}
+}
+
+// TestCollector_ReplayFailureRewindSurfacesSetCursorError verifies PR #47
+// finding 2: when a replay send fails and the cursor rewind SetCursor fails,
+// the error must be surfaced via logger.Error instead of being swallowed.
+// A swallowed rewind error leaves the persisted cursor at its pre-replay
+// position — typically AHEAD of the failed batch — so a restart without
+// replay would permanently skip the failed records.
+func TestCollector_ReplayFailureRewindSurfacesSetCursorError(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.BatchLimit = 2 // small batch to force multiple batches
+	cfg.Replay = true
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	// Failing transport on second call (batch 1 succeeds, batch 2 fails).
+	callCount := 0
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "replay-rewind-fail-001",
+		AcceptedCount: 2,
+	})
+	ft := &failingTransport{
+		transport: mockTransport,
+		err:       fmt.Errorf("simulated transport failure"),
+		callCount: &callCount,
+	}
+	c.transport = ft
+
+	// Route collector logs to a buffer so we can assert on the rewind
+	// error log line.
+	var logBuf bytes.Buffer
+	c.logger = slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	// Pre-existing stored cursor ahead of zero (the rewind target).
+	initialCursor := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := c.tracker.SetCursor(dbPath, initialCursor); err != nil {
+		t.Fatalf("SetCursor: %v", err)
+	}
+
+	// 4 records, batch limit 2 → 2 batches (2+2). Batch 1 succeeds,
+	// batch 2 fails via failingTransport.
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2", "rec-3", "rec-4"}, now),
+	}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+
+	// Force the rewind's SetCursor to fail deterministically: the tracker
+	// persists to <cursorDir>/.collector-state. Replace that file with a
+	// directory so the save() WriteFile fails with "is a directory" (this
+	// works regardless of the directory's write permissions). resolveDatabases
+	// must run first — it touches the cursor dir via the identity store.
+	stateFilePath := filepath.Join(dir, ".collector-state")
+	if err := os.RemoveAll(stateFilePath); err != nil {
+		t.Fatalf("RemoveAll state file: %v", err)
+	}
+	if err := os.Mkdir(stateFilePath, 0o755); err != nil {
+		t.Fatalf("Mkdir state file path: %v", err)
+	}
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	// Batch 1 sent OK, batch 2 failed.
+	if callCount != 2 {
+		t.Fatalf("expected 2 SendBatch calls (first success, second failure), got %d", callCount)
+	}
+
+	// The rewind SetCursor error must be logged, not swallowed.
+	if !strings.Contains(logBuf.String(), "failed to rewind cursor") {
+		t.Errorf("expected rewind error to be logged, got:\n%s", logBuf.String())
+	}
+
+	// The in-memory cursor state still reflects the attempted rewind to
+	// replaySince (zero time) — SetCursor updates memory before save().
+	cursor, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	if !cursor.IsZero() {
+		t.Errorf("cursor = %v, want zero time (rewind to replaySince attempted in-memory)", cursor)
+	}
+
+	// Replay did not complete.
+	if c.replayCompleted[dbPath] {
+		t.Error("replayCompleted should be false after failed replay")
 	}
 }
 

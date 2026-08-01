@@ -350,9 +350,15 @@ func (c *Collector) resolveDatabases() ([]dbIdentity, error) {
 // in batches up to batchLimit. The persisted cursor is only updated once
 // the full replay pass completes — per-batch cursor persistence is
 // deferred to avoid leaving the cursor inside a tie group if a later batch
-// sharing the same timestamp fails (Comment E Finding 1). On a replay
-// failure, the cursor is rewound to replaySince so a subsequent restart
-// (even without replay) re-reads the entire window.
+// sharing the same timestamp fails (Comment E Finding 1). At completion
+// the persisted cursor is clamped: if the replay window starts after the
+// stored cursor, the cursor stays at the stored cursor so records in
+// (storedCursor, replaySince] (never ingested, not re-read) remain
+// readable by normal incremental mode, and the completion cursor never
+// regresses below the stored cursor. On a replay failure, the cursor is
+// rewound to replaySince so a subsequent restart (even without replay)
+// re-reads the entire window; a rewind SetCursor failure is logged so an
+// operator can intervene before records are skipped.
 //
 // The replay pass is one-shot: once replay completes for a database, the
 // replayCompleted flag prevents re-triggering on subsequent poll cycles.
@@ -420,8 +426,22 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 				// the effective since time (last batch's max, or
 				// replaySince if no batches were sent) so normal
 				// incremental mode resumes from the correct position.
+				// The cursor is clamped so it never skips records that
+				// were never ingested and never regresses below the
+				// pre-replay stored cursor: if the replay window starts
+				// after the stored cursor, records in
+				// (storedCursor, replaySince] were neither previously
+				// ingested nor re-read by the replay — keeping the
+				// cursor at the stored cursor leaves them readable by
+				// normal incremental mode.
 				// Mark replay done so subsequent poll cycles skip replay.
-				_ = c.tracker.SetCursor(db.path, effectiveSince)
+				finalCursor := effectiveSince
+				if c.replaySince.After(cursor) {
+					finalCursor = cursor
+				} else if finalCursor.Before(cursor) {
+					finalCursor = cursor // never regress
+				}
+				_ = c.tracker.SetCursor(db.path, finalCursor)
 				c.replayCompleted[db.path] = true
 			}
 			// Send heartbeat regardless of mode so zero-record databases
@@ -448,8 +468,16 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 			// full window. Rewinding is safe: the earliest batch(s) that
 			// succeeded will be re-sent idempotently. In normal mode,
 			// returning without advancing is correct (cursor unchanged).
+			// The rewind error must be surfaced: if the rewind write
+			// fails, the persisted cursor stays at its pre-replay
+			// position — typically AHEAD of the failed batch — and a
+			// restart without replay would permanently skip those
+			// records (normal mode propagates SetCursor failures, so
+			// replay should not be weaker).
 			if useReplay {
-				_ = c.tracker.SetCursor(db.path, c.replaySince)
+				if err := c.tracker.SetCursor(db.path, c.replaySince); err != nil {
+					logger.Error("failed to rewind cursor after replay failure; restart without replay may skip the failed batch", "error", err)
+				}
 			}
 			return
 		}
@@ -469,8 +497,21 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 			)
 			// Persist cursor at the final batch's max occurred_at so
 			// subsequent normal incremental mode starts after all
-			// replayed records.
-			_ = c.tracker.SetCursor(db.path, lastRecord(records).OccurredAt)
+			// replayed records. The cursor is clamped so it never skips
+			// records that were never ingested and never regresses below
+			// the pre-replay stored cursor: if the replay window starts
+			// after the stored cursor, records in
+			// (storedCursor, replaySince] were neither previously
+			// ingested nor re-read by the replay — keeping the cursor at
+			// the stored cursor leaves them readable by normal
+			// incremental mode.
+			finalCursor := lastRecord(records).OccurredAt
+			if c.replaySince.After(cursor) {
+				finalCursor = cursor
+			} else if finalCursor.Before(cursor) {
+				finalCursor = cursor // never regress
+			}
+			_ = c.tracker.SetCursor(db.path, finalCursor)
 			c.replayCompleted[db.path] = true
 			return
 		}
