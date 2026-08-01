@@ -49,6 +49,11 @@ type Collector struct {
 	// replaySince is the computed effective since time for replay mode.
 	// Zero time means full history. Only meaningful when cfg.Replay is true.
 	replaySince time.Time
+
+	// replayCompleted tracks databases that have completed replay mode.
+	// In replay mode, each database is replayed once per process lifetime.
+	// The replay pass is skipped on subsequent poll cycles after completion.
+	replayCompleted map[string]bool
 }
 
 // dbIdentity holds the resolved identity for a single discovered database.
@@ -122,18 +127,19 @@ func NewCollector(cfg *config.Config, version string) (*Collector, error) {
 	}
 
 	return &Collector{
-		cfg:           cfg,
-		transport:     transport,
-		tracker:       tracker,
-		identityStore: identity.NewStore(cfg.CursorDir),
-		exclusionGate: exclusion.NewGate(cfg.CursorDir, cfg.ExcludeRecheckInterval),
-		logger:        logger,
-		hostname:      hostname,
-		version:       version,
-		lastSuccess:   make(map[string]time.Time),
-		batchLimit:    cfg.BatchLimit,
-		newReader:     defaultReaderFactory,
-		replaySince:   replaySince,
+		cfg:             cfg,
+		transport:       transport,
+		tracker:         tracker,
+		identityStore:   identity.NewStore(cfg.CursorDir),
+		exclusionGate:   exclusion.NewGate(cfg.CursorDir, cfg.ExcludeRecheckInterval),
+		logger:          logger,
+		hostname:        hostname,
+		version:         version,
+		lastSuccess:     make(map[string]time.Time),
+		batchLimit:      cfg.BatchLimit,
+		newReader:       defaultReaderFactory,
+		replaySince:     replaySince,
+		replayCompleted: make(map[string]bool),
 	}, nil
 }
 
@@ -343,6 +349,12 @@ func (c *Collector) resolveDatabases() ([]dbIdentity, error) {
 // cursor, and processDatabase loops to read and send all matching records
 // in batches up to batchLimit. The cursor advances per batch, so if replay
 // is interrupted, subsequent runs resume from the last cursor.
+//
+// The replay pass is one-shot: once replay completes for a database, the
+// replayCompleted flag prevents re-triggering on subsequent poll cycles.
+// During replay, a failed batch POST does NOT advance the read window —
+// the failed records are retried on the next poll cycle, consistent with
+// normal mode behavior.
 func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 	logger := c.logger.With(
 		"source_database_id", db.id,
@@ -355,10 +367,14 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 		return
 	}
 
+	// Determine whether to run a replay pass for this database.
+	// Replay is only entered once per database per process lifetime.
+	useReplay := c.cfg.Replay && !c.replayCompleted[db.path]
+
 	// Determine the effective since time. In replay mode, the stored cursor
 	// is ignored — we re-read from replaySince (full history if zero).
 	effectiveSince := cursor
-	if c.cfg.Replay {
+	if useReplay {
 		effectiveSince = c.replaySince
 		logger.Info("replay active — reading from effective since",
 			"effective_since", effectiveSince.Format(time.RFC3339),
@@ -383,8 +399,12 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 		}
 
 		if len(records) == 0 {
-			if !c.cfg.Replay {
+			if !useReplay {
 				c.maybeSendHeartbeat(ctx, db, logger)
+			} else {
+				// Replay complete — no more records. Mark done so
+				// subsequent poll cycles resume normal incremental mode.
+				c.replayCompleted[db.path] = true
 			}
 			return
 		}
@@ -399,12 +419,18 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 		projectDirs, _ := reader.ReadProjectDirectoryData(projectIDs)
 		todos, _ := reader.ReadTodoData(sessionIDs)
 
-		c.sendRecords(ctx, db, records, sessionCtxs, projects, projectDirs, todos, logger)
+		if err := c.sendRecords(ctx, db, records, sessionCtxs, projects, projectDirs, todos, logger); err != nil {
+			// Batch send failed — cursor was NOT updated by sendRecords.
+			// In replay mode, do NOT advance effectiveSince so the failed
+			// batch is retried on the next poll cycle. In normal mode,
+			// returning without advancing is also correct (cursor unchanged).
+			return
+		}
 
 		// In replay mode, advance effectiveSince to the last record's
 		// time_updated and loop if the batch was full (more records may
 		// exist). In normal mode, exit after one batch.
-		if !c.cfg.Replay {
+		if !useReplay {
 			return
 		}
 
@@ -414,6 +440,7 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 			logger.Info("replay complete for database",
 				"records_sent_in_final_batch", len(records),
 			)
+			c.replayCompleted[db.path] = true
 			return
 		}
 
@@ -434,7 +461,8 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 // IngestRequest with batch-level projection snapshots, POSTs it to the
 // Gateway, and updates the cursor on success. The cursor is advanced to the
 // maximum occurred_at timestamp in the batch. On failure, the cursor is NOT
-// updated — the same records will be retried on the next iteration.
+// updated and a non-nil error is returned — the same records will be retried
+// on the next iteration.
 func (c *Collector) sendRecords(
 	ctx context.Context,
 	db dbIdentity,
@@ -444,7 +472,7 @@ func (c *Collector) sendRecords(
 	projectDirs []sqlite.ProjectDirectoryData,
 	todos []sqlite.TodoData,
 	logger *slog.Logger,
-) {
+) error {
 	ingestRecords := make([]gateway.IngestRecord, 0, len(records))
 	for i := range records {
 		gwRec := ToGatewayUsageRecord(records[i])
@@ -474,7 +502,7 @@ func (c *Collector) sendRecords(
 			"error", err,
 			"record_count", len(records),
 		)
-		return
+		return fmt.Errorf("send batch: %w", err)
 	}
 
 	// Find max occurred_at among sent records (records are ordered ASC by
@@ -490,7 +518,7 @@ func (c *Collector) sendRecords(
 		logger.Error("failed to update cursor after successful send",
 			"error", err,
 		)
-		return
+		return fmt.Errorf("set cursor: %w", err)
 	}
 
 	c.mu.Lock()
@@ -508,6 +536,7 @@ func (c *Collector) sendRecords(
 		"project_directory_snapshots", len(reqProjectDirs),
 		"todo_snapshots", len(reqTodos),
 	)
+	return nil
 }
 
 // maybeSendHeartbeat sends an empty-batch heartbeat if no records are

@@ -1745,3 +1745,221 @@ func TestCollector_ReplayNotTriggeredWithoutExplicitConfig(t *testing.T) {
 		}
 	}
 }
+
+// TestCollector_ReplayDoesNotReTriggerOnSecondCycle verifies that the
+// replayCompleted latch prevents the replay pass from re-triggering on
+// subsequent poll cycles (acceptance criterion #3: "no re-replay every cycle").
+func TestCollector_ReplayDoesNotReTriggerOnSecondCycle(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "replay-once-001",
+		AcceptedCount: 3,
+	})
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.Replay = true // replay enabled
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+	c.transport = mockTransport
+
+	// Set a known old cursor.
+	oldCursor := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := c.tracker.SetCursor(dbPath, oldCursor); err != nil {
+		t.Fatalf("SetCursor: %v", err)
+	}
+
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	allRecords := makeRecords([]string{"rec-1", "rec-2", "rec-3"}, now)
+
+	mock := &mockReader{records: allRecords}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+
+	// --- First poll cycle: replay runs ---
+	c.processDatabase(context.Background(), dbs[0])
+
+	// Verify replay sent records (1 batch, 3 records).
+	if mockTransport.CallCount() != 1 {
+		t.Fatalf("first cycle: expected 1 batch, got %d", mockTransport.CallCount())
+	}
+	firstReq := mockTransport.LastCall().Req
+	if len(firstReq.Records) != 3 {
+		t.Fatalf("first cycle: expected 3 records, got %d", len(firstReq.Records))
+	}
+
+	// Verify cursor advanced to the last record's timestamp (rec-3 = now + 2s).
+	cursor, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	expectedCursor := now.Add(2 * time.Second)
+	if !cursor.Equal(expectedCursor) {
+		t.Errorf("first cycle: cursor = %v, want %v", cursor, expectedCursor)
+	}
+
+	// Verify replayCompleted is set for this database.
+	if !c.replayCompleted[dbPath] {
+		t.Error("first cycle: replayCompleted[dbPath] should be true after successful replay")
+	}
+
+	// --- Second poll cycle: replay should NOT re-trigger ---
+	// Reset call count by creating a fresh transport (reuse the collector).
+	mockTransport2 := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "normal-after-replay-001",
+		AcceptedCount: 0,
+	})
+	c.transport = mockTransport2
+
+	// Process again — replay is still true in config, but replayCompleted blocks it.
+	c.processDatabase(context.Background(), dbs[0])
+
+	// Verify no records were sent on the second cycle (cursor is past all records).
+	if mockTransport2.CallCount() > 0 {
+		req := mockTransport2.LastCall().Req
+		if len(req.Records) > 0 {
+			t.Errorf("second cycle: expected 0 records (replayCompleted latch should prevent re-replay), got %d", len(req.Records))
+		}
+	}
+
+	// Verify cursor did not regress.
+	cursor2, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	if !cursor2.Equal(expectedCursor) {
+		t.Errorf("second cycle: cursor = %v, want unchanged %v", cursor2, expectedCursor)
+	}
+}
+
+// TestCollector_ReplayFailedBatchDoesNotAdvanceWindow verifies that a
+// transport failure during replay does NOT advance the effective read window
+// (or cursor), so the failed records are retried on the next poll cycle.
+func TestCollector_ReplayFailedBatchDoesNotAdvanceWindow(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	// First call succeeds, second call fails.
+	callCount := 0
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "replay-partial-001",
+		AcceptedCount: 2,
+	})
+	// We'll intercept at SendBatch level by replacing the transport.
+	// Use mockTransport with Err set dynamically.
+	// Simpler: use two separate mock transports or inject via a custom transport.
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.BatchLimit = 2 // small batch to force multiple batches
+	cfg.Replay = true
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	// Build a custom transport wrapper that fails on the second call.
+	ft := &failingTransport{
+		transport: mockTransport,
+		err:       fmt.Errorf("simulated transport failure"),
+		callCount: &callCount,
+	}
+	c.transport = ft
+
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	allRecords := makeRecords([]string{"rec-1", "rec-2", "rec-3", "rec-4"}, now)
+
+	mock := &mockReader{records: allRecords}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+
+	// --- First pass: batch 1 succeeds, batch 2 fails ---
+	c.processDatabase(context.Background(), dbs[0])
+
+	// The collector should have sent 2 calls: first succeeded, second failed.
+	if callCount != 2 {
+		t.Fatalf("expected 2 SendBatch calls (first success, second failure), got %d", callCount)
+	}
+
+	// Cursor should be at rec-2's time (the successful first batch).
+	cursor, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	expectedCursorAfter1st := now.Add(1 * time.Second) // rec-2 = now + 1s
+	if !cursor.Equal(expectedCursorAfter1st) {
+		t.Errorf("after first pass: cursor = %v, want %v (first batch's max occurred_at)", cursor, expectedCursorAfter1st)
+	}
+
+	// replayCompleted should NOT be set (replay didn't complete).
+	if c.replayCompleted[dbPath] {
+		t.Error("after first pass: replayCompleted should be false (batch 2 failed)")
+	}
+
+	// --- Second pass: retry with transport that always succeeds ---
+	mockTransport2 := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "replay-retry-001",
+		AcceptedCount: 2,
+	})
+	c.transport = mockTransport2
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	// With replay still enabled, replay should resume. Since effectiveSince
+	// was NOT advanced past the failed batch, records from the beginning
+	// are re-read. Batch 1 (rec-1, rec-2) is sent again (idempotent);
+	// batch 2 (rec-3, rec-4) succeeds this time.
+	if mockTransport2.CallCount() < 2 {
+		t.Fatalf("second pass: expected at least 2 batches (retry of the failed window), got %d", mockTransport2.CallCount())
+	}
+
+	// Cursor should now be at rec-4's time (all records sent successfully).
+	cursor2, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	expectedCursorFinal := now.Add(3 * time.Second) // rec-4 = now + 3s
+	if !cursor2.Equal(expectedCursorFinal) {
+		t.Errorf("after second pass: cursor = %v, want %v (all records sent)", cursor2, expectedCursorFinal)
+	}
+
+	// replayCompleted should now be true.
+	if !c.replayCompleted[dbPath] {
+		t.Error("after second pass: replayCompleted should be true")
+	}
+}
+
+// SendBatch implements gateway.Transport for the failing transport test.
+type failingTransport struct {
+	transport gateway.Transport
+	err       error
+	callCount *int
+}
+
+func (ft *failingTransport) SendBatch(ctx context.Context, req *gateway.IngestRequest) (*gateway.IngestResponse, error) {
+	*ft.callCount++
+	if *ft.callCount == 2 {
+		return nil, ft.err
+	}
+	return ft.transport.SendBatch(ctx, req)
+}
