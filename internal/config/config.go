@@ -151,6 +151,9 @@ func (c *Config) Validate() error {
 	if c.BatchLimit <= 0 {
 		return fmt.Errorf("GATEWAY_COLLECTOR_BATCH_LIMIT must be positive")
 	}
+	if c.ReplaySince < 0 {
+		return fmt.Errorf("GATEWAY_COLLECTOR_REPLAY_SINCE must not be negative")
+	}
 	switch c.LogLevel {
 	case "debug", "info", "warn", "error", "":
 		// valid
