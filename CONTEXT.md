@@ -30,6 +30,8 @@
 
 **Cursor** — A persisted timestamp indicating the last processed `message.time_updated` value for a source database. Enables incremental reads across collector restarts. *Avoid: "checkpoint", "watermark"*
 
+**Replay** — An explicit collector mode that re-reads Source Database history past the Cursor and re-sends records and projections through the normal ingest pipeline. Used to backfill fields that were dropped or misnamed by an older collector version; the Gateway's idempotent upserts make re-sending safe. The Cursor advances after Replay completes so normal incremental runs resume. *Avoid: "rebuild", "resync"*
+
 **Canonical Record** — The single authoritative shape for a usage record, derived from the OpenCode assistant `message.data` JSON. Defined in ADR-0002.
 
 **Client Hostname** — The machine hostname (`os.Hostname()`) attached to each usage record for operational visibility. Resolved once at collector startup. Distinguished from `client_id` which is a stable instance identifier used in the idempotency key tuple. Allows operators to identify which machine generated a record without relying on IP addresses.
