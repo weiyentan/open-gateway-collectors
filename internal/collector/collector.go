@@ -356,9 +356,10 @@ func (c *Collector) resolveDatabases() ([]dbIdentity, error) {
 // (storedCursor, replaySince] (never ingested, not re-read) remain
 // readable by normal incremental mode, and the completion cursor never
 // regresses below the stored cursor. On a replay failure, the cursor is
-// rewound to replaySince so a subsequent restart (even without replay)
-// re-reads the entire window; a rewind SetCursor failure is logged so an
-// operator can intervene before records are skipped.
+// rewound to replaySince (clamped to the stored cursor when replaySince
+// lies after it) so a subsequent restart (even without replay) re-reads
+// the window; a rewind SetCursor failure is logged so an operator can
+// intervene before records are skipped.
 //
 // The replay pass is one-shot: once replay completes for a database, the
 // replayCompleted flag prevents re-triggering on subsequent poll cycles.
@@ -464,8 +465,9 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 		if err := c.sendRecords(ctx, db, records, sessionCtxs, projects, projectDirs, todos, logger, !useReplay); err != nil {
 			// Batch send failed — cursor was NOT updated by sendRecords.
 			// In replay mode, rewind the persisted cursor to replaySince
-			// so a subsequent restart (even without replay) re-reads the
-			// full window. Rewinding is safe: the earliest batch(s) that
+			// (clamped to the stored cursor when replaySince lies after
+			// it) so a subsequent restart (even without replay) re-reads
+			// the window. Rewinding is safe: the earliest batch(s) that
 			// succeeded will be re-sent idempotently. In normal mode,
 			// returning without advancing is correct (cursor unchanged).
 			// The rewind error must be surfaced: if the rewind write
