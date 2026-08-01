@@ -50,7 +50,7 @@ Each collector:
 
 Replay is a one-shot, explicitly-triggered operational mode that forces a re-read of Source Database history past the stored cursor and re-sends records (with their projection snapshots) through the normal ingest pipeline — useful for backfilling historical data after a collector field fix.
 
-- **Trigger:** the `-replay` CLI flag or `GATEWAY_COLLECTOR_REPLAY=true`. Replay never runs without an explicit trigger.
+- **Trigger:** the `-replay` CLI flag (force-enables replay; it cannot disable an environment-enabled replay) or `GATEWAY_COLLECTOR_REPLAY=true`. Replay never runs without an explicit trigger.
 - **Window:** `GATEWAY_COLLECTOR_REPLAY_SINCE` bounds replay to records newer than `time.Now().Add(-duration)`; the default (`0`) replays full history.
 - **After completion:** the stored cursor advances past the replayed records, so subsequent runs resume normal incremental reads — replay is not repeated on every cycle.
 
@@ -163,7 +163,7 @@ This project requires Go 1.25 or later. The module path is `github.com/opencode-
 | Flag | Description |
 |------|-------------|
 | `-version` | Print the collector version (`dev` for development builds) and exit |
-| `-replay` | Enable replay mode — re-read and re-send all historical records past the stored cursor. Overrides the `GATEWAY_COLLECTOR_REPLAY` env var. Use with `GATEWAY_COLLECTOR_REPLAY_SINCE` to bound the replay window. |
+| `-replay` | Enable replay mode — re-read and re-send all historical records past the stored cursor. Forces replay on; it cannot turn replay off when `GATEWAY_COLLECTOR_REPLAY=true` is already set in the environment. Use with `GATEWAY_COLLECTOR_REPLAY_SINCE` to bound the replay window. |
 
 ### Dependencies
 

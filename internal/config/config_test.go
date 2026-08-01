@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -274,6 +275,41 @@ func TestValidateBatchLimit(t *testing.T) {
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Error("Validate() expected error for zero batch limit")
+	}
+}
+
+func TestValidateReplaySince(t *testing.T) {
+	tests := []struct {
+		name        string
+		replaySince time.Duration
+		wantErr     bool
+		wantMsg     string
+	}{
+		{"zero is valid", 0, false, ""},
+		{"positive is valid", 720 * time.Hour, false, ""},
+		{"negative is rejected", -1 * time.Hour, true, "GATEWAY_COLLECTOR_REPLAY_SINCE must not be negative"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Token:             "t",
+				BaseURL:           "http://localhost",
+				PollInterval:      60 * time.Second,
+				HeartbeatInterval: 120 * time.Second,
+				BatchLimit:        100,
+				ReplaySince:       tt.replaySince,
+			}
+			err := cfg.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if tt.wantMsg != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantMsg) {
+					t.Errorf("Validate() error = %v, want error containing %q", err, tt.wantMsg)
+				}
+			}
+		})
 	}
 }
 
