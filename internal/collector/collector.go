@@ -49,6 +49,12 @@ type Collector struct {
 	// replaySince is the computed effective since time for replay mode.
 	// Zero time means full history. Only meaningful when cfg.Replay is true.
 	replaySince time.Time
+
+	// replayDone is set to true after the first iterate call completes the
+	// replay pass. Once true, subsequent iterations use normal incremental
+	// reads from the stored cursor. Makes replay a single-pass operation
+	// per collector run (ADR-0008).
+	replayDone bool
 }
 
 // dbIdentity holds the resolved identity for a single discovered database.
@@ -231,6 +237,15 @@ func (c *Collector) iterate(ctx context.Context) {
 		}
 		c.processDatabase(ctx, db)
 	}
+
+	// After the first iteration with replay enabled, mark replay as done
+	// so subsequent iterations use normal incremental reads (single-pass
+	// semantics per ADR-0008). The cursor has been advanced by
+	// sendRecords during the replay loop — we now resume normal mode.
+	if c.cfg.Replay && !c.replayDone {
+		c.replayDone = true
+		c.logger.Info("replay pass completed — resuming normal incremental mode")
+	}
 }
 
 // resolveDatabases discovers all source database paths and resolves their
@@ -355,10 +370,13 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 		return
 	}
 
-	// Determine the effective since time. In replay mode, the stored cursor
-	// is ignored — we re-read from replaySince (full history if zero).
+	// Determine the effective since time. In replay mode (before the
+	// first replay pass completes), the stored cursor is ignored — we
+	// re-read from replaySince (full history if zero). Once the replay
+	// pass completes (replayDone is true), subsequent iterations resume
+	// normal incremental reads from the stored cursor.
 	effectiveSince := cursor
-	if c.cfg.Replay {
+	if c.cfg.Replay && !c.replayDone {
 		effectiveSince = c.replaySince
 		logger.Info("replay active — reading from effective since",
 			"effective_since", effectiveSince.Format(time.RFC3339),
@@ -383,7 +401,7 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 		}
 
 		if len(records) == 0 {
-			if !c.cfg.Replay {
+			if !c.cfg.Replay || c.replayDone {
 				c.maybeSendHeartbeat(ctx, db, logger)
 			}
 			return
@@ -401,10 +419,12 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 
 		c.sendRecords(ctx, db, records, sessionCtxs, projects, projectDirs, todos, logger)
 
-		// In replay mode, advance effectiveSince to the last record's
-		// time_updated and loop if the batch was full (more records may
-		// exist). In normal mode, exit after one batch.
-		if !c.cfg.Replay {
+		// During the active replay pass (cfg.Replay && !replayDone),
+		// advance effectiveSince to the last record's time_updated and
+		// loop if the batch was full (more records may exist). In
+		// normal mode or after replay completes (replayDone), exit
+		// after one batch.
+		if !c.cfg.Replay || c.replayDone {
 			return
 		}
 

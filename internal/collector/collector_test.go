@@ -1745,3 +1745,104 @@ func TestCollector_ReplayNotTriggeredWithoutExplicitConfig(t *testing.T) {
 		}
 	}
 }
+
+// TestCollector_ReplaySinglePassDoesNotRepeatOnSubsequentIterations proves
+// that after the replay pass completes (via iterate), a subsequent call to
+// processDatabase with cfg.Replay still true does NOT re-replay — it reads
+// incrementally from the advanced cursor. This validates the single-pass
+// semantics from ADR-0008: the watermark advances after replay completes so
+// subsequent runs resume normal incremental behavior.
+func TestCollector_ReplaySinglePassDoesNotRepeatOnSubsequentIterations(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	// First transport: used during the replay pass.
+	mockTransport1 := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "replay-pass-batch",
+		AcceptedCount: 3,
+	})
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.Replay = true
+	cfg.BatchLimit = 2 // small batch to force multiple batches inside replay
+
+	c, err := NewCollector(cfg, "0.3.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+	c.transport = mockTransport1
+
+	// Set a known old cursor — replay should ignore it and read all records.
+	oldCursor := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := c.tracker.SetCursor(dbPath, oldCursor); err != nil {
+		t.Fatalf("SetCursor: %v", err)
+	}
+
+	// 5 records with batch limit 2 => 3 batches (2+2+1).
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	allRecords := makeRecords([]string{"rec-1", "rec-2", "rec-3", "rec-4", "rec-5"}, now)
+
+	mock := &mockReader{records: allRecords}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	// --- First pass: run iterate with replay enabled ---
+	c.iterate(context.Background())
+
+	// Verify replay sent 3 batches (2+2+1 with batch limit 2).
+	if mockTransport1.CallCount() != 3 {
+		t.Fatalf("replay pass: expected 3 batches (batch limit 2, 5 records), got %d", mockTransport1.CallCount())
+	}
+
+	// Verify cursor advanced to last record's time.
+	cursor, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor after replay: %v", err)
+	}
+	expectedCursor := now.Add(4 * time.Second) // rec-5 is at +4s
+	if !cursor.Equal(expectedCursor) {
+		t.Errorf("cursor after replay = %v, want %v", cursor, expectedCursor)
+	}
+
+	// Verify replayDone was set by iterate.
+	if !c.replayDone {
+		t.Error("expected replayDone = true after replay pass completes")
+	}
+
+	// --- Second pass: call processDatabase directly while cfg.Replay is still true ---
+	// This simulates a subsequent poll cycle. Because replayDone is now true,
+	// processDatabase must use the stored cursor (which is at the latest record),
+	// NOT restart from replaySince.
+
+	// Fresh transport for the second pass.
+	mockTransport2 := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "post-replay-normal",
+		AcceptedCount: 0,
+	})
+	c.transport = mockTransport2
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases (post-replay): %v", err)
+	}
+	if len(dbs) != 1 {
+		t.Fatalf("expected 1 DB, got %d", len(dbs))
+	}
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	// After replay, the cursor is at the latest record timestamp.
+	// In normal incremental mode, ReadRecords returns 0 records because
+	// no records are newer than the cursor. No heartbeat should fire
+	// because lastSuccess was seeded at startup time (zero elapsed).
+	// Either way, no records should be sent.
+	if mockTransport2.CallCount() > 0 {
+		req := mockTransport2.LastCall().Req
+		if len(req.Records) > 0 {
+			t.Errorf("expected 0 records on post-replay iteration (cursor advanced), got %d", len(req.Records))
+		}
+	}
+}
