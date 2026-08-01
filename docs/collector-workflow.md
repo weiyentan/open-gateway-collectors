@@ -88,7 +88,7 @@ Each push cycle (one `iterate()` call) runs every **Poll Interval** (default: 60
 
 ### Phase 2: Incremental Reading
 
-4. **Cursor Lookup** — The collector retrieves the last-sent `OccurredAt` timestamp for the database from the state tracker (`.collector-state` file). On a first-ever run, this returns a zero time, meaning all records will be backfilled.
+4. **Cursor Lookup** — The collector retrieves the last-sent `OccurredAt` timestamp for the database from the state tracker (`.collector-state` file). On a first-ever run, this returns a zero time, meaning all records will be backfilled. In **Replay mode** the stored Cursor is ignored and history is re-read from an explicit window instead — see [docs/replay-mode.md](replay-mode.md) for the operational guide.
 
  5. **Read Records** — The SQLite reader runs a prepared query joining `message` and `session` tables, filtering for `message.time_updated > cursor` and only assistant messages that contain `tokens.input` in their `JSON` data blob. Records are returned sorted by `time_updated` ascending, limited to the batch limit (default: 500).
 

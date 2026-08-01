@@ -54,6 +54,8 @@ Replay is a one-shot, explicitly-triggered operational mode that forces a re-rea
 - **Window:** `GATEWAY_COLLECTOR_REPLAY_SINCE` bounds replay to records newer than `time.Now().Add(-duration)`; the default (`0`) replays full history.
 - **After completion:** the stored cursor advances past the replayed records, so subsequent runs resume normal incremental reads — replay is not repeated on every cycle.
 
+See [docs/replay-mode.md](docs/replay-mode.md) for the full operational guide.
+
 ## Quick Start
 
 ### Prerequisites
