@@ -389,23 +389,37 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 	}
 	defer closeFn()
 
+	// effectiveLastID is the secondary key for tie-safe composite paging.
+	// When non-empty, subsequent pages use ReadRecordsAfter with the
+	// composite (time_updated, id) cursor to avoid dropping records that
+	// share a timestamp with the last record of the previous page.
+	var effectiveLastID string
+
 	// Replay loop: in replay mode, keep reading batches until no more
 	// records are returned. In normal mode, this runs exactly once.
 	for {
-		records, err := reader.ReadRecords(effectiveSince, c.batchLimit)
+		var records []sqlite.UsageRecord
+		var err error
+		if useReplay && effectiveLastID != "" {
+			records, err = reader.ReadRecordsAfter(effectiveSince, effectiveLastID, c.batchLimit)
+		} else {
+			records, err = reader.ReadRecords(effectiveSince, c.batchLimit)
+		}
 		if err != nil {
 			logger.Error("failed to read records", "error", err)
 			return
 		}
 
 		if len(records) == 0 {
-			if !useReplay {
-				c.maybeSendHeartbeat(ctx, db, logger)
-			} else {
+			if useReplay {
 				// Replay complete — no more records. Mark done so
 				// subsequent poll cycles resume normal incremental mode.
 				c.replayCompleted[db.path] = true
 			}
+			// Send heartbeat regardless of mode so zero-record databases
+			// still get a heartbeat on the replay-complete pass.
+			// maybeSendHeartbeat gates internally on prior success + interval.
+			c.maybeSendHeartbeat(ctx, db, logger)
 			return
 		}
 
@@ -427,9 +441,9 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 			return
 		}
 
-		// In replay mode, advance effectiveSince to the last record's
-		// time_updated and loop if the batch was full (more records may
-		// exist). In normal mode, exit after one batch.
+		// In replay mode, advance the composite cursor to the last
+		// record's (time_updated, id) and loop if the batch was full
+		// (more records may exist). In normal mode, exit after one batch.
 		if !useReplay {
 			return
 		}
@@ -444,16 +458,14 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 			return
 		}
 
-		// Advance effectiveSince past the last record in this batch to
-		// read the next batch. Records are in ASC time_updated order,
-		// so we take the max from this batch.
-		maxOccurred := records[0].OccurredAt
-		for i := 1; i < len(records); i++ {
-			if records[i].OccurredAt.After(maxOccurred) {
-				maxOccurred = records[i].OccurredAt
-			}
-		}
-		effectiveSince = maxOccurred
+		// Advance the composite cursor for tie-safe paging. Records are
+		// ordered ASC by (time_updated, id), so the last element is the
+		// composite max. Setting both effectiveSince and effectiveLastID
+		// ensures the next page starts strictly after the last record,
+		// preventing silent drops at tied timestamps.
+		last := records[len(records)-1]
+		effectiveSince = last.OccurredAt
+		effectiveLastID = last.SourceRecordID
 	}
 }
 
@@ -506,13 +518,8 @@ func (c *Collector) sendRecords(
 	}
 
 	// Find max occurred_at among sent records (records are ordered ASC by
-	// the reader query, but compute explicitly for safety).
-	maxOccurred := records[0].OccurredAt
-	for i := 1; i < len(records); i++ {
-		if records[i].OccurredAt.After(maxOccurred) {
-			maxOccurred = records[i].OccurredAt
-		}
-	}
+	// (time_updated, id), so the last element is the composite max).
+	maxOccurred := maxOccurredAt(records)
 
 	if err := c.tracker.SetCursor(db.path, maxOccurred); err != nil {
 		logger.Error("failed to update cursor after successful send",
@@ -613,6 +620,20 @@ func newLogger(level string) *slog.Logger {
 	}
 	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: l})
 	return slog.New(handler)
+}
+
+// ---------------------------------------------------------------------------
+// General helpers
+// ---------------------------------------------------------------------------
+
+// maxOccurredAt returns the greatest OccurredAt from a non-empty slice of
+// UsageRecords. Records must be ordered ASC by (time_updated, id), so the
+// last element is the composite max. Returns zero time for an empty slice.
+func maxOccurredAt(records []sqlite.UsageRecord) time.Time {
+	if len(records) == 0 {
+		return time.Time{}
+	}
+	return records[len(records)-1].OccurredAt
 }
 
 // ---------------------------------------------------------------------------

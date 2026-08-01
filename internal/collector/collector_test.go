@@ -103,6 +103,23 @@ func (m *mockReader) ReadRecords(since time.Time, limit int) ([]sqlite.UsageReco
 	return result, nil
 }
 
+func (m *mockReader) ReadRecordsAfter(since time.Time, afterID string, limit int) ([]sqlite.UsageRecord, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	var result []sqlite.UsageRecord
+	for _, r := range m.records {
+		after := r.OccurredAt.After(since) || (r.OccurredAt.Equal(since) && r.SourceRecordID > afterID)
+		if after {
+			result = append(result, r)
+		}
+	}
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
 func (m *mockReader) ReadSessionContexts(sessionIDs []string) ([]sqlite.SessionContextData, error) {
 	return m.sessionCtxs, nil
 }
@@ -1498,6 +1515,117 @@ func TestCollector_ReplaySendsAllRecordsAcrossBatches(t *testing.T) {
 	expectedCursor := now.Add(9 * time.Second)
 	if !cursor.Equal(expectedCursor) {
 		t.Errorf("cursor = %v, want %v", cursor, expectedCursor)
+	}
+}
+
+// makeTiedRecords creates test UsageRecords that all share the same
+// OccurredAt timestamp, useful for testing tie-safe composite paging.
+func makeTiedRecords(ids []string, ts time.Time) []sqlite.UsageRecord {
+	var out []sqlite.UsageRecord
+	for _, id := range ids {
+		out = append(out, sqlite.UsageRecord{
+			SourceRecordID:       id,
+			SourceSessionID:      "sess-" + id,
+			ModelID:              "gpt-4",
+			TokensInput:          100,
+			TokensOutput:         50,
+			TokensCacheRead:      10,
+			TokensCacheWrite:     5,
+			OpenCodeReportedCost: 0.003,
+			OccurredAt:           ts,
+		})
+	}
+	return out
+}
+
+func TestCollector_ReplaySendsAllTiedRecordsAcrossBatches(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "replay-tied-001",
+		AcceptedCount: 5,
+	})
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.BatchLimit = 3 // small batch limit to force multiple batches
+	cfg.Replay = true
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+	c.transport = mockTransport
+
+	// 5 records all at the same timestamp.
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	allRecords := makeTiedRecords([]string{"rec-1", "rec-2", "rec-3", "rec-4", "rec-5"}, now)
+
+	mock := &mockReader{records: allRecords}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+	if len(dbs) != 1 {
+		t.Fatalf("expected 1 DB, got %d", len(dbs))
+	}
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	// Expect 2 batches (3 + 2) since batch limit is 3 and there are 5 records.
+	if mockTransport.CallCount() != 2 {
+		t.Fatalf("expected 2 batches, got %d", mockTransport.CallCount())
+	}
+
+	// Collect all sent SourceRecordIDs across all batches.
+	sentIDs := make(map[string]bool)
+	for _, call := range mockTransport.Calls() {
+		for _, rec := range call.Req.Records {
+			sentIDs[rec.SourceRecordID] = true
+		}
+	}
+	if len(sentIDs) != 5 {
+		t.Errorf("expected 5 unique record IDs sent, got %d (dropped records)", len(sentIDs))
+	}
+	for _, id := range []string{"rec-1", "rec-2", "rec-3", "rec-4", "rec-5"} {
+		if !sentIDs[id] {
+			t.Errorf("record %s was not sent (dropped due to tie paging bug)", id)
+		}
+	}
+
+	// Verify cursor advanced to now.
+	cursor, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	if !cursor.Equal(now) {
+		t.Errorf("cursor = %v, want %v", cursor, now)
+	}
+
+	// Verify replayCompleted is set.
+	if !c.replayCompleted[dbPath] {
+		t.Error("replayCompleted should be true")
+	}
+
+	// Second cycle should send zero records (replay completed, cursor past all).
+	mockTransport2 := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "after-replay",
+		AcceptedCount: 0,
+	})
+	c.transport = mockTransport2
+
+	c.processDatabase(context.Background(), dbs[0])
+	if mockTransport2.CallCount() > 0 {
+		req := mockTransport2.LastCall().Req
+		if len(req.Records) > 0 {
+			t.Errorf("second cycle: expected 0 records, got %d", len(req.Records))
+		}
 	}
 }
 

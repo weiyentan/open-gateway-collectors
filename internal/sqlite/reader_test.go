@@ -1167,4 +1167,132 @@ func TestSchemaInfo_NoOptionalTables(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Composite paging tests
+// ---------------------------------------------------------------------------
+
+func TestReadRecordsAfterCompositePaging(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", parentID: "", workspaceID: "ws-1", agent: "claude", model: ""},
+	}
+	// 5 messages at the SAME time_updated, plus 2 more at a later time.
+	messages := []messageRow{
+		{id: "msg-a1", sessionID: "sess-a", timeCreated: tsBase, timeUpdated: tsBase, data: assistantFullUsage},
+		{id: "msg-a2", sessionID: "sess-a", timeCreated: tsBase + 1, timeUpdated: tsBase, data: partialUsage},
+		{id: "msg-a3", sessionID: "sess-a", timeCreated: tsBase + 2, timeUpdated: tsBase, data: zeroCostUsage},
+		{id: "msg-a4", sessionID: "sess-a", timeCreated: tsBase + 3, timeUpdated: tsBase, data: assistantUsageAnother},
+		{id: "msg-a5", sessionID: "sess-a", timeCreated: tsBase + 4, timeUpdated: tsBase, data: assistantFullUsage},
+		{id: "msg-b1", sessionID: "sess-a", timeCreated: tsBase + 10*tsStep, timeUpdated: tsBase + 10*tsStep, data: partialUsage},
+		{id: "msg-b2", sessionID: "sess-a", timeCreated: tsBase + 11*tsStep, timeUpdated: tsBase + 10*tsStep, data: zeroCostUsage},
+	}
+
+	dbPath := createTestDB(t, sessions, messages)
+
+	r, err := NewOpenCodeReader(dbPath)
+	if err != nil {
+		t.Fatalf("NewOpenCodeReader failed: %v", err)
+	}
+	defer r.Close()
+
+	batchLimit := 2
+	collected := make(map[string]bool)
+
+	// Page 1: strict time-only (ReadRecords).
+	page1, err := r.ReadRecords(time.UnixMilli(0), batchLimit)
+	if err != nil {
+		t.Fatalf("ReadRecords page 1: %v", err)
+	}
+	if len(page1) != 2 {
+		t.Fatalf("page 1: expected 2 records, got %d", len(page1))
+	}
+	for _, rec := range page1 {
+		collected[rec.SourceRecordID] = true
+	}
+
+	// Page 1 max composite: last record's (time_updated, id).
+	last1 := page1[len(page1)-1]
+	since1 := last1.OccurredAt
+	after1 := last1.SourceRecordID
+
+	// Page 2: composite cursor (msg-a2, msg-a3 expected since limit=2).
+	page2, err := r.ReadRecordsAfter(since1, after1, batchLimit)
+	if err != nil {
+		t.Fatalf("ReadRecordsAfter page 2: %v", err)
+	}
+	if len(page2) != 2 {
+		t.Fatalf("page 2: expected 2 records, got %d", len(page2))
+	}
+	for _, rec := range page2 {
+		if collected[rec.SourceRecordID] {
+			t.Errorf("page 2: duplicate record %s", rec.SourceRecordID)
+		}
+		collected[rec.SourceRecordID] = true
+	}
+
+	// Page 3: composite cursor (msg-a4, msg-a5 expected with limit=2).
+	last2 := page2[len(page2)-1]
+	since2 := last2.OccurredAt
+	after2 := last2.SourceRecordID
+
+	page3, err := r.ReadRecordsAfter(since2, after2, batchLimit)
+	if err != nil {
+		t.Fatalf("ReadRecordsAfter page 3: %v", err)
+	}
+	// Should get 1 record (msg-a5) plus 2 from later time = 3? No — limit=2,
+	// so we get msg-a5 and msg-b1 (the remaining tied + first of the next time).
+	if len(page3) != 2 {
+		t.Fatalf("page 3: expected 2 records, got %d", len(page3))
+	}
+	for _, rec := range page3 {
+		if collected[rec.SourceRecordID] {
+			t.Errorf("page 3: duplicate record %s", rec.SourceRecordID)
+		}
+		collected[rec.SourceRecordID] = true
+	}
+
+	// Page 4: composite cursor (msg-b1).
+	last3 := page3[len(page3)-1]
+	since3 := last3.OccurredAt
+	after3 := last3.SourceRecordID
+
+	page4, err := r.ReadRecordsAfter(since3, after3, batchLimit)
+	if err != nil {
+		t.Fatalf("ReadRecordsAfter page 4: %v", err)
+	}
+	if len(page4) != 1 {
+		t.Fatalf("page 4: expected 1 record (msg-b2), got %d", len(page4))
+	}
+	for _, rec := range page4 {
+		if collected[rec.SourceRecordID] {
+			t.Errorf("page 4: duplicate record %s", rec.SourceRecordID)
+		}
+		collected[rec.SourceRecordID] = true
+	}
+
+	// Page 5: should return 0 records.
+	last4 := page4[len(page4)-1]
+	since4 := last4.OccurredAt
+	after4 := last4.SourceRecordID
+
+	page5, err := r.ReadRecordsAfter(since4, after4, batchLimit)
+	if err != nil {
+		t.Fatalf("ReadRecordsAfter page 5: %v", err)
+	}
+	if len(page5) != 0 {
+		t.Errorf("page 5: expected 0 records, got %d", len(page5))
+	}
+
+	// Verify all 7 records collected exactly once.
+	expectedIDs := []string{"msg-a1", "msg-a2", "msg-a3", "msg-a4", "msg-a5", "msg-b1", "msg-b2"}
+	for _, id := range expectedIDs {
+		if !collected[id] {
+			t.Errorf("record %s was never collected (dropped)", id)
+		}
+	}
+	if len(collected) != len(expectedIDs) {
+		t.Errorf("expected %d unique records, got %d (may include unexpected ids)", len(expectedIDs), len(collected))
+	}
+}
+
 
