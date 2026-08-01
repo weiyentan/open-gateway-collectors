@@ -475,7 +475,14 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 			// records (normal mode propagates SetCursor failures, so
 			// replay should not be weaker).
 			if useReplay {
-				if err := c.tracker.SetCursor(db.path, c.replaySince); err != nil {
+				rewindTo := c.replaySince
+				if rewindTo.After(cursor) {
+					// Never advance the persisted cursor past records in
+					// (storedCursor, replaySince] that were neither ingested nor
+					// re-read — same clamp as the replay-completion paths.
+					rewindTo = cursor
+				}
+				if err := c.tracker.SetCursor(db.path, rewindTo); err != nil {
 					logger.Error("failed to rewind cursor after replay failure; restart without replay may skip the failed batch", "error", err)
 				}
 			}

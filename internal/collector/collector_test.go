@@ -2578,6 +2578,86 @@ func TestCollector_ReplayFailureRewindSurfacesSetCursorError(t *testing.T) {
 	}
 }
 
+// TestCollector_ReplayFailureRewindClampsWhenReplaySinceAfterStoredCursor verifies
+// PR #47 finding E13: when replay batch send fails AND replaySince is after the
+// stored cursor, the failure-path rewind must clamp to the stored cursor instead of
+// advancing it to replaySince. Without the clamp, records in (storedCursor, replaySince]
+// that were never ingested and never re-read are permanently skipped on restart.
+func TestCollector_ReplayFailureRewindClampsWhenReplaySinceAfterStoredCursor(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.Replay = true
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	// Set stored cursor far in the past (e.g. 2024-01-01).
+	storedCursor := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := c.tracker.SetCursor(dbPath, storedCursor); err != nil {
+		t.Fatalf("SetCursor: %v", err)
+	}
+
+	// replaySince is AFTER the stored cursor (e.g. 2025-07-01).
+	// This simulates GATEWAY_COLLECTOR_REPLAY_SINCE=24h on a collector
+	// that was down for months — the replay window starts after
+	// records that were never ingested.
+	c.replaySince = time.Date(2025, 7, 1, 0, 0, 0, 0, time.UTC)
+
+	// Transport always fails — batch send triggers failure-path rewind.
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "replay-clamp-001",
+		AcceptedCount: 0,
+	})
+	mockTransport.Err = fmt.Errorf("simulated transport failure")
+	c.transport = mockTransport
+
+	// Records exist: these would be read by the replay but never sent
+	// because the transport always fails. After processDatabase returns,
+	// the cursor must be clamped back to storedCursor, NOT advanced to
+	// replaySince.
+	now := time.Date(2025, 8, 1, 12, 0, 0, 0, time.UTC)
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2"}, now),
+	}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	// Verify the transport was called (batch send failed).
+	if mockTransport.CallCount() == 0 {
+		t.Fatal("expected at least 1 SendBatch call")
+	}
+
+	// CRITICAL: cursor must be clamped to storedCursor, NOT advanced to replaySince.
+	// Without the clamp (the bug), the cursor would be set to replaySince (2025-07-01),
+	// permanently skipping records in (storedCursor, replaySince].
+	cursor, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	if !cursor.Equal(storedCursor) {
+		t.Errorf("cursor = %v, want stored cursor %v (bug: failure rewind advanced cursor past never-ingested records)", cursor, storedCursor)
+	}
+
+	// Replay did not complete — the latch must NOT be set.
+	if c.replayCompleted[dbPath] {
+		t.Error("replayCompleted should be false after failed replay")
+	}
+}
+
 // spyTransport wraps a gateway.Transport and invokes a callback after each
 // successful SendBatch call, passing the 1-indexed call number.
 type spyTransport struct {
