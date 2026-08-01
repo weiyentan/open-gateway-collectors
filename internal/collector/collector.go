@@ -463,7 +463,7 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 		// composite max. Setting both effectiveSince and effectiveLastID
 		// ensures the next page starts strictly after the last record,
 		// preventing silent drops at tied timestamps.
-		last := records[len(records)-1]
+		last := lastRecord(records)
 		effectiveSince = last.OccurredAt
 		effectiveLastID = last.SourceRecordID
 	}
@@ -519,7 +519,7 @@ func (c *Collector) sendRecords(
 
 	// Find max occurred_at among sent records (records are ordered ASC by
 	// (time_updated, id), so the last element is the composite max).
-	maxOccurred := maxOccurredAt(records)
+	maxOccurred := lastRecord(records).OccurredAt
 
 	if err := c.tracker.SetCursor(db.path, maxOccurred); err != nil {
 		logger.Error("failed to update cursor after successful send",
@@ -626,14 +626,11 @@ func newLogger(level string) *slog.Logger {
 // General helpers
 // ---------------------------------------------------------------------------
 
-// maxOccurredAt returns the greatest OccurredAt from a non-empty slice of
-// UsageRecords. Records must be ordered ASC by (time_updated, id), so the
-// last element is the composite max. Returns zero time for an empty slice.
-func maxOccurredAt(records []sqlite.UsageRecord) time.Time {
-	if len(records) == 0 {
-		return time.Time{}
-	}
-	return records[len(records)-1].OccurredAt
+// lastRecord returns the last record in a batch ordered ascending by
+// (time_updated, id). It is the composite maximum (time_updated, id) of the
+// batch and defines the exclusive boundary for the next page read.
+func lastRecord(records []sqlite.UsageRecord) sqlite.UsageRecord {
+	return records[len(records)-1]
 }
 
 // ---------------------------------------------------------------------------
