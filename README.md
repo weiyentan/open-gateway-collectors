@@ -46,6 +46,14 @@ Each collector:
 | `GATEWAY_COLLECTOR_REPLAY` | No | `false` | Enable replay mode — re-read and re-send all historical records past the stored cursor |
 | `GATEWAY_COLLECTOR_REPLAY_SINCE` | No | `0` (full history) | Bounds replay to records newer than `time.Now().Add(-duration)`. Accepts Go duration strings (e.g. `720h`, `30m`). Zero means full history. Only used when Replay is enabled. |
 
+### Replay Mode
+
+Replay is a one-shot, explicitly-triggered operational mode that forces a re-read of Source Database history past the stored cursor and re-sends records (with their projection snapshots) through the normal ingest pipeline — useful for backfilling historical data after a collector field fix.
+
+- **Trigger:** the `-replay` CLI flag or `GATEWAY_COLLECTOR_REPLAY=true`. Replay never runs without an explicit trigger.
+- **Window:** `GATEWAY_COLLECTOR_REPLAY_SINCE` bounds replay to records newer than `time.Now().Add(-duration)`; the default (`0`) replays full history.
+- **After completion:** the stored cursor advances past the replayed records, so subsequent runs resume normal incremental reads — replay is not repeated on every cycle.
+
 ## Quick Start
 
 ### Prerequisites
