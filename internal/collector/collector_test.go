@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -2029,14 +2030,15 @@ func TestCollector_ReplayFailedBatchDoesNotAdvanceWindow(t *testing.T) {
 		t.Fatalf("expected 2 SendBatch calls (first success, second failure), got %d", callCount)
 	}
 
-	// Cursor should be at rec-2's time (the successful first batch).
+	// Cursor should be rewound to replaySince (zero time) after replay failure,
+	// NOT at rec-2's time. Rewinding ensures a subsequent restart (even without
+	// replay) re-reads the full window — sends are idempotent on the Gateway.
 	cursor, err := c.tracker.GetCursor(dbPath)
 	if err != nil {
 		t.Fatalf("GetCursor: %v", err)
 	}
-	expectedCursorAfter1st := now.Add(1 * time.Second) // rec-2 = now + 1s
-	if !cursor.Equal(expectedCursorAfter1st) {
-		t.Errorf("after first pass: cursor = %v, want %v (first batch's max occurred_at)", cursor, expectedCursorAfter1st)
+	if !cursor.IsZero() {
+		t.Errorf("after first pass: cursor = %v, want zero time (rewound to replaySince after failure)", cursor)
 	}
 
 	// replayCompleted should NOT be set (replay didn't complete).
@@ -2075,6 +2077,214 @@ func TestCollector_ReplayFailedBatchDoesNotAdvanceWindow(t *testing.T) {
 	if !c.replayCompleted[dbPath] {
 		t.Error("after second pass: replayCompleted should be true")
 	}
+}
+
+// TestCollector_ReplayFailedBatchWithTiedTimestampsRewindsCursor verifies that
+// when a batch fails during replay and the batch boundary splits a tie group
+// (multiple records sharing the same occurred_at), the persisted cursor is NOT
+// left inside the tie group at the successful batch's max. Instead, it is rewound
+// to replaySince so a subsequent non-replay run can re-read the failed records.
+// This catches the silent-record-loss scenario described in Comment E Finding 1.
+func TestCollector_ReplayFailedBatchWithTiedTimestampsRewindsCursor(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.BatchLimit = 2 // small batch to force ties across boundaries
+	cfg.Replay = true
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	// Failing transport on second call (batch 1 succeeds, batch 2 fails).
+	callCount := 0
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "replay-tied-fail-001",
+		AcceptedCount: 2,
+	})
+	ft := &failingTransport{
+		transport: mockTransport,
+		err:       fmt.Errorf("simulated transport failure"),
+		callCount: &callCount,
+	}
+	c.transport = ft
+
+	// 5 records at the SAME timestamp. Batch limit 2 → 3 batches (2+2+1).
+	// Batch 1 (rec-1, rec-2) succeeds. Batch 2 (rec-3, rec-4) FAILS.
+	// The bug: without the fix, sendRecords persists cursor at the timestamp
+	// (now) after batch 1 succeeds. If the process restarts without replay,
+	// ReadRecords(since=now, ...) uses strict > and skips rec-3, rec-4, rec-5
+	// permanently — silent data loss.
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	allRecords := makeTiedRecords([]string{"rec-1", "rec-2", "rec-3", "rec-4", "rec-5"}, now)
+
+	mock := &mockReader{records: allRecords}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+
+	// Run replay — batch 1 succeeds, batch 2 fails.
+	c.processDatabase(context.Background(), dbs[0])
+
+	// Verify 2 calls: first success, second failure.
+	if callCount != 2 {
+		t.Fatalf("expected 2 SendBatch calls, got %d", callCount)
+	}
+
+	// CRITICAL: cursor must be rewound to replaySince (zero time), NOT at the
+	// successful batch's max (now). If cursor == now, the remaining records
+	// at this timestamp would be silently dropped on a subsequent non-replay run.
+	cursor, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	if !cursor.IsZero() {
+		t.Errorf("cursor should be rewound to replaySince (zero), got %v (bug: cursor inside tie group)", cursor)
+	}
+
+	// replayCompleted should NOT be set (replay didn't complete).
+	if c.replayCompleted[dbPath] {
+		t.Error("replayCompleted should be false after failed replay")
+	}
+}
+
+// TestCollector_ReplayCursorOnlyPersistedOnCompletion verifies Part A of
+// Comment E Finding 1: during replay, the persisted cursor is NOT updated
+// per-batch. It is only persisted once the full replay pass completes.
+func TestCollector_ReplayCursorOnlyPersistedOnCompletion(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "replay-cursor-persist-001",
+		AcceptedCount: 10,
+	})
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.BatchLimit = 2 // small batch to force multiple batches
+	cfg.Replay = true
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+	c.transport = mockTransport
+
+	// Set a pre-existing cursor — should be ignored during replay but should
+	// be surpassed by the final cursor set at replay completion.
+	oldCursor := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := c.tracker.SetCursor(dbPath, oldCursor); err != nil {
+		t.Fatalf("SetCursor: %v", err)
+	}
+
+	// 4 records with tied timestamps, batch limit 2 → 2 batches (2+2).
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	allRecords := makeTiedRecords([]string{"rec-1", "rec-2", "rec-3", "rec-4"}, now)
+
+	// Use a spy transport that tracks when SendBatch is called so we can
+	// check the persisted cursor between batches.
+	mock := &mockReader{records: allRecords}
+	var cursorAfterBatch1 time.Time
+	var cursorAfterBatch2 time.Time
+
+	spyTransport := &spyTransport{
+		transport: mockTransport,
+		afterCall: func(callNum int) {
+			cursor, _ := c.tracker.GetCursor(dbPath)
+			switch callNum {
+			case 1:
+				cursorAfterBatch1 = cursor
+			case 2:
+				cursorAfterBatch2 = cursor
+			}
+		},
+	}
+	c.transport = spyTransport
+
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	// Verify 2 batches were sent.
+	if spyTransport.CallCount() != 2 {
+		t.Fatalf("expected 2 batches, got %d", spyTransport.CallCount())
+	}
+
+	// After batch 1, cursor must NOT have advanced (per-batch persistence
+	// is disabled during replay — Part A).
+	if !cursorAfterBatch1.Equal(oldCursor) {
+		t.Errorf("after batch 1: cursor should still be old cursor %v, got %v (bug: cursor persisted per-batch during replay)", oldCursor, cursorAfterBatch1)
+	}
+
+	// Even after the second (final, limit-filling) batch, cursor must NOT
+	// have advanced — persistence is deferred until replay completion is
+	// confirmed (a later page could still exist and fail, and persisting
+	// mid-tie-group risks permanent record loss).
+	if !cursorAfterBatch2.Equal(oldCursor) {
+		t.Errorf("after batch 2: cursor should still be old cursor %v, got %v (bug: cursor persisted before replay completion)", oldCursor, cursorAfterBatch2)
+	}
+
+	// After replay completion, cursor must be at the final batch's max.
+	cursorFinal, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	if !cursorFinal.Equal(now) {
+		t.Errorf("after replay completion: cursor should be final max %v, got %v", now, cursorFinal)
+	}
+
+	// replayCompleted should be set.
+	if !c.replayCompleted[dbPath] {
+		t.Error("replayCompleted should be true after successful replay")
+	}
+}
+
+// spyTransport wraps a gateway.Transport and invokes a callback after each
+// successful SendBatch call, passing the 1-indexed call number.
+type spyTransport struct {
+	transport gateway.Transport
+	afterCall func(callNum int)
+	mu        sync.Mutex
+	callCount int
+}
+
+func (st *spyTransport) SendBatch(ctx context.Context, req *gateway.IngestRequest) (*gateway.IngestResponse, error) {
+	resp, err := st.transport.SendBatch(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	st.mu.Lock()
+	st.callCount++
+	n := st.callCount
+	st.mu.Unlock()
+	if st.afterCall != nil {
+		st.afterCall(n)
+	}
+	return resp, nil
+}
+
+func (st *spyTransport) CallCount() int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.callCount
 }
 
 // SendBatch implements gateway.Transport for the failing transport test.
