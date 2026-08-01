@@ -16,9 +16,20 @@ import (
 // for concurrent use if the underlying database driver supports it.
 type Reader interface {
 	// ReadRecords returns usage records with message.time_updated strictly
-	// greater than since, ordered by time_updated ascending, up to limit
+	// greater than since, ordered by (time_updated ASC, id ASC), up to limit
 	// records. User messages without tokens.input in message.data are skipped.
+	// This is the strict time-only cursor read; for tie-safe replay paging
+	// use ReadRecordsAfter.
 	ReadRecords(since time.Time, limit int) ([]UsageRecord, error)
+
+	// ReadRecordsAfter returns usage records with a composite key (time_updated, id)
+	// strictly greater than (since, afterID), ordered by (time_updated ASC, id ASC),
+	// up to limit records. This provides tie-safe paging when multiple records
+	// share the same time_updated — the secondary key on id ensures no records
+	// are silently dropped at batch boundaries.
+	// Zero-value afterID (empty string) is equivalent to ReadRecords(since, limit)
+	// for the first page of a tied-timestamp window.
+	ReadRecordsAfter(since time.Time, afterID string, limit int) ([]UsageRecord, error)
 
 	// ReadSessionContexts returns session context data for the given session
 	// IDs. If the session table lacks expected columns, those fields are
@@ -48,9 +59,10 @@ type Reader interface {
 // It uses a read-only connection with a prepared statement for efficient
 // cursor-based incremental reads.
 type OpenCodeReader struct {
-	db     *sql.DB
-	stmt   *sql.Stmt
-	dbInfo *DatabaseInfo
+	db       *sql.DB
+	stmt     *sql.Stmt
+	stmtAfter *sql.Stmt
+	dbInfo   *DatabaseInfo
 }
 
 // NewOpenCodeReader opens an OpenCode SQLite database in read-only mode,
@@ -77,14 +89,31 @@ func NewOpenCodeReader(dbPath string) (*OpenCodeReader, error) {
 		JOIN session s ON s.id = m.session_id
 		WHERE m.time_updated > ?
 		  AND json_extract(m.data, '$.tokens.input') IS NOT NULL
-		ORDER BY m.time_updated ASC
+		ORDER BY m.time_updated ASC, m.id ASC
 		LIMIT ?`)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("preparing read statement: %w", err)
 	}
 
-	return &OpenCodeReader{db: db, stmt: stmt}, nil
+	stmtAfter, err := db.Prepare(`
+		SELECT
+			m.id, m.session_id, m.time_created, m.time_updated, m.data,
+			s.time_created, s.time_updated, s.project_id, s.parent_id,
+			s.workspace_id, s.agent
+		FROM message m
+		JOIN session s ON s.id = m.session_id
+		WHERE (m.time_updated, m.id) > (?, ?)
+		  AND json_extract(m.data, '$.tokens.input') IS NOT NULL
+		ORDER BY m.time_updated ASC, m.id ASC
+		LIMIT ?`)
+	if err != nil {
+		_ = stmt.Close()
+		db.Close()
+		return nil, fmt.Errorf("preparing after statement: %w", err)
+	}
+
+	return &OpenCodeReader{db: db, stmt: stmt, stmtAfter: stmtAfter}, nil
 }
 
 // WithSchemaInfo attaches the DatabaseInfo from OpenAndInspect so the reader
@@ -114,6 +143,27 @@ func (r *OpenCodeReader) ReadRecords(since time.Time, limit int) ([]UsageRecord,
 	}
 	defer rows.Close()
 
+	return scanRecords(rows)
+}
+
+// ReadRecordsAfter implements Reader.ReadRecordsAfter using composite
+// (time_updated, id) paging for tie-safe replay.
+func (r *OpenCodeReader) ReadRecordsAfter(since time.Time, afterID string, limit int) ([]UsageRecord, error) {
+	sinceMs := since.UnixMilli()
+
+	rows, err := r.stmtAfter.Query(sinceMs, afterID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("querying records after: %w", err)
+	}
+	defer rows.Close()
+
+	return scanRecords(rows)
+}
+
+// scanRecords scans all rows from the given *sql.Rows into a slice of
+// UsageRecord. It is the shared row-scan loop used by both ReadRecords and
+// ReadRecordsAfter.
+func scanRecords(rows *sql.Rows) ([]UsageRecord, error) {
 	var records []UsageRecord
 	for rows.Next() {
 		var (
@@ -148,10 +198,13 @@ func (r *OpenCodeReader) ReadRecords(since time.Time, limit int) ([]UsageRecord,
 	return records, nil
 }
 
-// Close releases the database connection and prepared statement.
+// Close releases the database connection and prepared statements.
 func (r *OpenCodeReader) Close() error {
 	if r.stmt != nil {
 		_ = r.stmt.Close()
+	}
+	if r.stmtAfter != nil {
+		_ = r.stmtAfter.Close()
 	}
 	return r.db.Close()
 }

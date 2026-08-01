@@ -57,3 +57,12 @@ func (m *MockTransport) LastCall() *TransportCall {
 	call := m.calls[len(m.calls)-1]
 	return &call
 }
+
+// Calls returns a copy of all recorded TransportCall entries in order.
+func (m *MockTransport) Calls() []TransportCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]TransportCall, len(m.calls))
+	copy(out, m.calls)
+	return out
+}

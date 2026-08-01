@@ -24,6 +24,7 @@ var Version = "dev"
 func main() {
 	// -version flag prints version and exits before any other setup.
 	showVersion := flag.Bool("version", false, "print version and exit")
+	replayFlag := flag.Bool("replay", false, "enable replay mode — re-read and re-send all historical records")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("opencode-collector v" + Version)
@@ -35,6 +36,11 @@ func main() {
 	if err != nil {
 		slog.Error("failed to load configuration", "error", err)
 		os.Exit(1)
+	}
+
+	// -replay CLI flag overwrites the env var — explicit trigger wins.
+	if *replayFlag {
+		cfg.Replay = true
 	}
 
 	// Create the collector — wires all components together and resolves

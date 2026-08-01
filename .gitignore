@@ -35,6 +35,9 @@ Desktop.ini
 # Local automation metadata
 .status/
 
+# Local worktree clones
+.worktrees/
+
 # Docker
 docker-compose.override.yml
 

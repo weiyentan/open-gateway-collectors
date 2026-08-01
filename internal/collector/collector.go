@@ -45,6 +45,15 @@ type Collector struct {
 	seedOnce    sync.Once
 
 	newReader readerFactory
+
+	// replaySince is the computed effective since time for replay mode.
+	// Zero time means full history. Only meaningful when cfg.Replay is true.
+	replaySince time.Time
+
+	// replayCompleted tracks databases that have completed replay mode.
+	// In replay mode, each database is replayed once per process lifetime.
+	// The replay pass is skipped on subsequent poll cycles after completion.
+	replayCompleted map[string]bool
 }
 
 // dbIdentity holds the resolved identity for a single discovered database.
@@ -77,6 +86,26 @@ func NewCollector(cfg *config.Config, version string) (*Collector, error) {
 		"log_level", cfg.LogLevel,
 	)
 
+	// Compute the replay since time from config. Zero ReplaySince means full
+	// history (zero time). A non-zero value means replay records newer than
+	// time.Now().Add(-ReplaySince).
+	var replaySince time.Time
+	if cfg.Replay && cfg.ReplaySince > 0 {
+		replaySince = time.Now().Add(-cfg.ReplaySince)
+	}
+
+	// Log replay configuration if enabled.
+	if cfg.Replay {
+		if cfg.ReplaySince > 0 {
+			logger.Info("replay mode enabled",
+				"replay_since", replaySince.Format(time.RFC3339),
+				"replay_since_duration", cfg.ReplaySince.String(),
+			)
+		} else {
+			logger.Info("replay mode enabled — full history")
+		}
+	}
+
 	tracker, err := state.NewTracker(cfg.CursorDir)
 	if err != nil {
 		return nil, fmt.Errorf("creating state tracker: %w", err)
@@ -98,17 +127,19 @@ func NewCollector(cfg *config.Config, version string) (*Collector, error) {
 	}
 
 	return &Collector{
-		cfg:           cfg,
-		transport:     transport,
-		tracker:       tracker,
-		identityStore: identity.NewStore(cfg.CursorDir),
-		exclusionGate: exclusion.NewGate(cfg.CursorDir, cfg.ExcludeRecheckInterval),
-		logger:        logger,
-		hostname:      hostname,
-		version:       version,
-		lastSuccess:   make(map[string]time.Time),
-		batchLimit:    cfg.BatchLimit,
-		newReader:     defaultReaderFactory,
+		cfg:             cfg,
+		transport:       transport,
+		tracker:         tracker,
+		identityStore:   identity.NewStore(cfg.CursorDir),
+		exclusionGate:   exclusion.NewGate(cfg.CursorDir, cfg.ExcludeRecheckInterval),
+		logger:          logger,
+		hostname:        hostname,
+		version:         version,
+		lastSuccess:     make(map[string]time.Time),
+		batchLimit:      cfg.BatchLimit,
+		newReader:       defaultReaderFactory,
+		replaySince:     replaySince,
+		replayCompleted: make(map[string]bool),
 	}, nil
 }
 
@@ -312,6 +343,29 @@ func (c *Collector) resolveDatabases() ([]dbIdentity, error) {
 // It reads new records since the last cursor, sends them to the Gateway,
 // or sends a heartbeat if the database is idle. The cursor is only updated
 // after a successful POST — failed POSTs are retried on the next iteration.
+//
+// In replay mode (cfg.Replay == true), the effective since time is
+// replaySince (which may be zero for full history) instead of the stored
+// cursor, and processDatabase loops to read and send all matching records
+// in batches up to batchLimit. The persisted cursor is only updated once
+// the full replay pass completes — per-batch cursor persistence is
+// deferred to avoid leaving the cursor inside a tie group if a later batch
+// sharing the same timestamp fails (Comment E Finding 1). At completion
+// the persisted cursor is clamped: if the replay window starts after the
+// stored cursor, the cursor stays at the stored cursor so records in
+// (storedCursor, replaySince] (never ingested, not re-read) remain
+// readable by normal incremental mode, and the completion cursor never
+// regresses below the stored cursor. On a replay failure, the cursor is
+// rewound to replaySince (clamped to the stored cursor when replaySince
+// lies after it) so a subsequent restart (even without replay) re-reads
+// the window; a rewind SetCursor failure is logged so an operator can
+// intervene before records are skipped.
+//
+// The replay pass is one-shot: once replay completes for a database, the
+// replayCompleted flag prevents re-triggering on subsequent poll cycles.
+// During replay, a failed batch POST does NOT advance the read window —
+// the failed records are retried on the next poll cycle, consistent with
+// normal mode behavior.
 func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 	logger := c.logger.With(
 		"source_database_id", db.id,
@@ -324,6 +378,21 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 		return
 	}
 
+	// Determine whether to run a replay pass for this database.
+	// Replay is only entered once per database per process lifetime.
+	useReplay := c.cfg.Replay && !c.replayCompleted[db.path]
+
+	// Determine the effective since time. In replay mode, the stored cursor
+	// is ignored — we re-read from replaySince (full history if zero).
+	effectiveSince := cursor
+	if useReplay {
+		effectiveSince = c.replaySince
+		logger.Info("replay active — reading from effective since",
+			"effective_since", effectiveSince.Format(time.RFC3339),
+			"stored_cursor", cursor.Format(time.RFC3339),
+		)
+	}
+
 	reader, closeFn, err := c.newReader(db.path, db.dbInfo)
 	if err != nil {
 		logger.Error("failed to open reader", "error", err)
@@ -331,13 +400,58 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 	}
 	defer closeFn()
 
-	records, err := reader.ReadRecords(cursor, c.batchLimit)
-	if err != nil {
-		logger.Error("failed to read records", "error", err)
-		return
-	}
+	// effectiveLastID is the secondary key for tie-safe composite paging.
+	// When non-empty, subsequent pages use ReadRecordsAfter with the
+	// composite (time_updated, id) cursor to avoid dropping records that
+	// share a timestamp with the last record of the previous page.
+	var effectiveLastID string
 
-	if len(records) > 0 {
+	// Replay loop: in replay mode, keep reading batches until no more
+	// records are returned. In normal mode, this runs exactly once.
+	for {
+		var records []sqlite.UsageRecord
+		var err error
+		if useReplay && effectiveLastID != "" {
+			records, err = reader.ReadRecordsAfter(effectiveSince, effectiveLastID, c.batchLimit)
+		} else {
+			records, err = reader.ReadRecords(effectiveSince, c.batchLimit)
+		}
+		if err != nil {
+			logger.Error("failed to read records", "error", err)
+			return
+		}
+
+		if len(records) == 0 {
+			if useReplay {
+				// Replay complete — no more records. Persist cursor at
+				// the effective since time (last batch's max, or
+				// replaySince if no batches were sent) so normal
+				// incremental mode resumes from the correct position.
+				// The cursor is clamped so it never skips records that
+				// were never ingested and never regresses below the
+				// pre-replay stored cursor: if the replay window starts
+				// after the stored cursor, records in
+				// (storedCursor, replaySince] were neither previously
+				// ingested nor re-read by the replay — keeping the
+				// cursor at the stored cursor leaves them readable by
+				// normal incremental mode.
+				// Mark replay done so subsequent poll cycles skip replay.
+				finalCursor := effectiveSince
+				if c.replaySince.After(cursor) {
+					finalCursor = cursor
+				} else if finalCursor.Before(cursor) {
+					finalCursor = cursor // never regress
+				}
+				_ = c.tracker.SetCursor(db.path, finalCursor)
+				c.replayCompleted[db.path] = true
+			}
+			// Send heartbeat regardless of mode so zero-record databases
+			// still get a heartbeat on the replay-complete pass.
+			// maybeSendHeartbeat gates internally on prior success + interval.
+			c.maybeSendHeartbeat(ctx, db, logger)
+			return
+		}
+
 		// Extract unique session IDs and project IDs from the records
 		// for projection reads.
 		sessionIDs := uniqueSessionIDs(records)
@@ -348,17 +462,92 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 		projectDirs, _ := reader.ReadProjectDirectoryData(projectIDs)
 		todos, _ := reader.ReadTodoData(sessionIDs)
 
-		c.sendRecords(ctx, db, records, sessionCtxs, projects, projectDirs, todos, logger)
-	} else {
-		c.maybeSendHeartbeat(ctx, db, logger)
+		if err := c.sendRecords(ctx, db, records, sessionCtxs, projects, projectDirs, todos, logger, !useReplay); err != nil {
+			// Batch send failed — cursor was NOT updated by sendRecords.
+			// In replay mode, rewind the persisted cursor to replaySince
+			// (clamped to the stored cursor when replaySince lies after
+			// it) so a subsequent restart (even without replay) re-reads
+			// the window. Rewinding is safe: the earliest batch(s) that
+			// succeeded will be re-sent idempotently. In normal mode,
+			// returning without advancing is correct (cursor unchanged).
+			// The rewind error must be surfaced: if the rewind write
+			// fails, the persisted cursor stays at its pre-replay
+			// position — typically AHEAD of the failed batch — and a
+			// restart without replay would permanently skip those
+			// records (normal mode propagates SetCursor failures, so
+			// replay should not be weaker).
+			if useReplay {
+				rewindTo := c.replaySince
+				if rewindTo.After(cursor) {
+					// Never advance the persisted cursor past records in
+					// (storedCursor, replaySince] that were neither ingested nor
+					// re-read — same clamp as the replay-completion paths.
+					rewindTo = cursor
+				}
+				if err := c.tracker.SetCursor(db.path, rewindTo); err != nil {
+					logger.Error("failed to rewind cursor after replay failure; restart without replay may skip the failed batch", "error", err)
+				}
+			}
+			return
+		}
+
+		// In replay mode, advance the composite cursor to the last
+		// record's (time_updated, id) and loop if the batch was full
+		// (more records may exist). In normal mode, exit after one batch.
+		if !useReplay {
+			return
+		}
+
+		// If fewer records than the batch limit were returned, we've read
+		// everything — done with replay for this database.
+		if len(records) < c.batchLimit {
+			logger.Info("replay complete for database",
+				"records_sent_in_final_batch", len(records),
+			)
+			// Persist cursor at the final batch's max occurred_at so
+			// subsequent normal incremental mode starts after all
+			// replayed records. The cursor is clamped so it never skips
+			// records that were never ingested and never regresses below
+			// the pre-replay stored cursor: if the replay window starts
+			// after the stored cursor, records in
+			// (storedCursor, replaySince] were neither previously
+			// ingested nor re-read by the replay — keeping the cursor at
+			// the stored cursor leaves them readable by normal
+			// incremental mode.
+			finalCursor := lastRecord(records).OccurredAt
+			if c.replaySince.After(cursor) {
+				finalCursor = cursor
+			} else if finalCursor.Before(cursor) {
+				finalCursor = cursor // never regress
+			}
+			_ = c.tracker.SetCursor(db.path, finalCursor)
+			c.replayCompleted[db.path] = true
+			return
+		}
+
+		// Advance the composite cursor for tie-safe paging. Records are
+		// ordered ASC by (time_updated, id), so the last element is the
+		// composite max. Setting both effectiveSince and effectiveLastID
+		// ensures the next page starts strictly after the last record,
+		// preventing silent drops at tied timestamps.
+		last := lastRecord(records)
+		effectiveSince = last.OccurredAt
+		effectiveLastID = last.SourceRecordID
 	}
 }
 
 // sendRecords converts sqlite usage records to ingest records, builds an
 // IngestRequest with batch-level projection snapshots, POSTs it to the
-// Gateway, and updates the cursor on success. The cursor is advanced to the
-// maximum occurred_at timestamp in the batch. On failure, the cursor is NOT
-// updated — the same records will be retried on the next iteration.
+// Gateway, and updates the cursor on success (when persistCursor is true).
+// On failure, the cursor is NOT updated and a non-nil error is returned —
+// the same records will be retried on the next iteration.
+//
+// persistCursor controls whether the persisted cursor is advanced to the
+// maximum occurred_at timestamp in the batch. During replay, the caller
+// passes false so cursor persistence is deferred to replay completion
+// (avoiding permanent data loss if a later batch in the same tie group
+// fails). In normal incremental mode, the caller passes true for
+// immediate per-batch persistence.
 func (c *Collector) sendRecords(
 	ctx context.Context,
 	db dbIdentity,
@@ -368,7 +557,8 @@ func (c *Collector) sendRecords(
 	projectDirs []sqlite.ProjectDirectoryData,
 	todos []sqlite.TodoData,
 	logger *slog.Logger,
-) {
+	persistCursor bool,
+) error {
 	ingestRecords := make([]gateway.IngestRecord, 0, len(records))
 	for i := range records {
 		gwRec := ToGatewayUsageRecord(records[i])
@@ -398,23 +588,24 @@ func (c *Collector) sendRecords(
 			"error", err,
 			"record_count", len(records),
 		)
-		return
+		return fmt.Errorf("send batch: %w", err)
 	}
 
+	// Persist cursor per-batch only outside of replay mode (normal
+	// incremental operation). During replay, the cursor is only persisted
+	// once the full replay pass completes — persisting per-batch during
+	// replay risks leaving the cursor inside a tie group if a later batch
+	// sharing the same timestamp fails (Comment E Finding 1).
 	// Find max occurred_at among sent records (records are ordered ASC by
-	// the reader query, but compute explicitly for safety).
-	maxOccurred := records[0].OccurredAt
-	for i := 1; i < len(records); i++ {
-		if records[i].OccurredAt.After(maxOccurred) {
-			maxOccurred = records[i].OccurredAt
+	// (time_updated, id), so the last element is the composite max).
+	maxOccurred := lastRecord(records).OccurredAt
+	if persistCursor {
+		if err := c.tracker.SetCursor(db.path, maxOccurred); err != nil {
+			logger.Error("failed to update cursor after successful send",
+				"error", err,
+			)
+			return fmt.Errorf("set cursor: %w", err)
 		}
-	}
-
-	if err := c.tracker.SetCursor(db.path, maxOccurred); err != nil {
-		logger.Error("failed to update cursor after successful send",
-			"error", err,
-		)
-		return
 	}
 
 	c.mu.Lock()
@@ -432,6 +623,7 @@ func (c *Collector) sendRecords(
 		"project_directory_snapshots", len(reqProjectDirs),
 		"todo_snapshots", len(reqTodos),
 	)
+	return nil
 }
 
 // maybeSendHeartbeat sends an empty-batch heartbeat if no records are
@@ -508,6 +700,17 @@ func newLogger(level string) *slog.Logger {
 	}
 	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: l})
 	return slog.New(handler)
+}
+
+// ---------------------------------------------------------------------------
+// General helpers
+// ---------------------------------------------------------------------------
+
+// lastRecord returns the last record in a batch ordered ascending by
+// (time_updated, id). It is the composite maximum (time_updated, id) of the
+// batch and defines the exclusive boundary for the next page read.
+func lastRecord(records []sqlite.UsageRecord) sqlite.UsageRecord {
+	return records[len(records)-1]
 }
 
 // ---------------------------------------------------------------------------
