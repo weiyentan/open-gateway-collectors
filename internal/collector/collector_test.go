@@ -2410,6 +2410,98 @@ func TestCollector_ReplayCompletionEmptyBatchClampsCursorWhenReplaySinceAfterSto
 	}
 }
 
+// TestCollector_ReplayZeroRecordDatabaseStillSendsHeartbeat is the
+// regression test for PR #47 review finding F5 (Minor): originally
+// maybeSendHeartbeat was only called in the non-replay branch, so a
+// database with zero records got no heartbeat / last_seen_at update while
+// replay stayed enabled. The fix calls maybeSendHeartbeat unconditionally
+// on the zero-records path, so a zero-record database processed during a
+// replay pass must still POST an empty-batch heartbeat when the heartbeat
+// gate conditions are met (prior successful POST + interval elapsed), and
+// the replay pass must still complete (latch set, cursor persisted).
+func TestCollector_ReplayZeroRecordDatabaseStillSendsHeartbeat(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "replay-heartbeat-001",
+		AcceptedCount: 0,
+	})
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.Replay = true
+	cfg.HeartbeatInterval = 10 * time.Millisecond // short interval for test
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+	c.transport = mockTransport
+
+	// Stored cursor older than replaySince — the replay window reads
+	// nothing, so the pass takes the zero-records path.
+	storedCursor := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := c.tracker.SetCursor(dbPath, storedCursor); err != nil {
+		t.Fatalf("SetCursor: %v", err)
+	}
+	c.replaySince = time.Date(2025, 7, 1, 0, 0, 0, 0, time.UTC)
+
+	// Seed a prior successful POST whose timestamp is older than the
+	// heartbeat interval, so the heartbeat gate (prior success + interval
+	// elapsed) is satisfied.
+	c.mu.Lock()
+	c.lastSuccess[dbPath] = time.Now().Add(-100 * time.Millisecond)
+	c.mu.Unlock()
+
+	// Zero records from the reader.
+	mock := &mockReader{}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	// Exactly one batch must have been sent: the heartbeat. Before the
+	// F5 fix, zero batches were sent because maybeSendHeartbeat was only
+	// called in the non-replay branch.
+	if mockTransport.CallCount() != 1 {
+		t.Fatalf("expected exactly 1 heartbeat batch, got %d (bug: heartbeat suppressed during replay with zero records)", mockTransport.CallCount())
+	}
+
+	// The heartbeat is an empty ingest batch for this source database.
+	call := mockTransport.LastCall()
+	if call == nil || call.Req == nil {
+		t.Fatal("expected a recorded heartbeat request")
+	}
+	if len(call.Req.Records) != 0 {
+		t.Errorf("expected 0 records in heartbeat request, got %d", len(call.Req.Records))
+	}
+	if call.Req.SourceDatabaseID != dbs[0].id {
+		t.Errorf("SourceDatabaseID = %q, want %q", call.Req.SourceDatabaseID, dbs[0].id)
+	}
+
+	// The replay pass must still complete in this zero-record scenario:
+	// the latch is set and the cursor is persisted (clamped to the stored
+	// cursor since replaySince lies after it).
+	if !c.replayCompleted[dbPath] {
+		t.Error("replayCompleted should be true after zero-record replay pass")
+	}
+	cursor, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	if !cursor.Equal(storedCursor) {
+		t.Errorf("cursor = %v, want stored cursor %v", cursor, storedCursor)
+	}
+}
+
 // TestCollector_ReplayCompletionNeverRegressesCursor verifies PR #47
 // finding 1's "never regress" clause: when the pre-replay stored cursor is
 // AHEAD of everything the replay re-read (e.g. full-history replay against
