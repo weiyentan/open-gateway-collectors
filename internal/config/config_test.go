@@ -201,6 +201,69 @@ func TestValidateHeartbeatInterval(t *testing.T) {
 	}
 }
 
+func TestLoadReplayEnabled(t *testing.T) {
+	saved := saveEnv()
+	defer restoreEnv(saved)
+	clearEnv()
+
+	t.Setenv("GATEWAY_COLLECTOR_TRANSPORT", "http")
+	t.Setenv("GATEWAY_COLLECTOR_TOKEN", "test-token")
+	t.Setenv("GATEWAY_BASE_URL", "http://localhost:8080")
+	t.Setenv("GATEWAY_COLLECTOR_REPLAY", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() returned unexpected error: %v", err)
+	}
+	if !cfg.Replay {
+		t.Error("Replay = false, want true")
+	}
+	if cfg.ReplaySince != 0 {
+		t.Errorf("ReplaySince = %v, want zero (full history)", cfg.ReplaySince)
+	}
+}
+
+func TestLoadReplaySinceDuration(t *testing.T) {
+	saved := saveEnv()
+	defer restoreEnv(saved)
+	clearEnv()
+
+	t.Setenv("GATEWAY_COLLECTOR_TRANSPORT", "http")
+	t.Setenv("GATEWAY_COLLECTOR_TOKEN", "test-token")
+	t.Setenv("GATEWAY_BASE_URL", "http://localhost:8080")
+	t.Setenv("GATEWAY_COLLECTOR_REPLAY", "true")
+	t.Setenv("GATEWAY_COLLECTOR_REPLAY_SINCE", "720h")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() returned unexpected error: %v", err)
+	}
+	if !cfg.Replay {
+		t.Error("Replay = false, want true")
+	}
+	if cfg.ReplaySince != 720*time.Hour {
+		t.Errorf("ReplaySince = %v, want 720h", cfg.ReplaySince)
+	}
+}
+
+func TestLoadReplayDisabledByDefault(t *testing.T) {
+	saved := saveEnv()
+	defer restoreEnv(saved)
+	clearEnv()
+
+	t.Setenv("GATEWAY_COLLECTOR_TRANSPORT", "http")
+	t.Setenv("GATEWAY_COLLECTOR_TOKEN", "test-token")
+	t.Setenv("GATEWAY_BASE_URL", "http://localhost:8080")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() returned unexpected error: %v", err)
+	}
+	if cfg.Replay {
+		t.Error("Replay = true, want false (disabled by default)")
+	}
+}
+
 func TestValidateBatchLimit(t *testing.T) {
 	cfg := &Config{
 		Token:             "t",
@@ -232,6 +295,8 @@ func saveEnv() map[string]string {
 		"GATEWAY_KAFKA_BROKERS",
 		"GATEWAY_KAFKA_TOPIC",
 		"GATEWAY_KAFKA_CLIENT_ID",
+		"GATEWAY_COLLECTOR_REPLAY",
+		"GATEWAY_COLLECTOR_REPLAY_SINCE",
 	}
 	saved := make(map[string]string, len(keys))
 	for _, k := range keys {
@@ -267,6 +332,8 @@ func clearEnv() {
 		"GATEWAY_KAFKA_BROKERS",
 		"GATEWAY_KAFKA_TOPIC",
 		"GATEWAY_KAFKA_CLIENT_ID",
+		"GATEWAY_COLLECTOR_REPLAY",
+		"GATEWAY_COLLECTOR_REPLAY_SINCE",
 	}
 	for _, k := range keys {
 		os.Unsetenv(k)

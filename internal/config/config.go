@@ -13,6 +13,11 @@ import (
 	"time"
 )
 
+// Truthy values recognised for boolean env vars (case-insensitive).
+var truthy = map[string]bool{
+	"true": true, "1": true, "yes": true,
+}
+
 const defaultBatchLimit = 100
 
 // Config holds all configuration for the collector application.
@@ -68,6 +73,19 @@ type Config struct {
 	// KafkaClientID is the Kafka client ID used when connecting to brokers.
 	// Defaults to the hostname.
 	KafkaClientID string `env:"GATEWAY_KAFKA_CLIENT_ID"`
+
+	// Replay enables replay mode, which forces a full re-read of source
+	// database records past the stored cursor and re-sends them through the
+	// normal ingest pipeline. When enabled, the collector runs a single
+	// replay pass before entering the normal poll loop (or exits after the
+	// replay pass in one-shot mode).
+	Replay bool `env:"GATEWAY_COLLECTOR_REPLAY"`
+
+	// ReplaySince bounds the replay window to records newer than
+	// time.Now().Add(-ReplaySince). A zero value means full history
+	// (replay all records regardless of timestamp). Only used when
+	// Replay is true.
+	ReplaySince time.Duration `env:"GATEWAY_COLLECTOR_REPLAY_SINCE"`
 }
 
 // Load reads configuration from environment variables with defaults.
@@ -88,6 +106,8 @@ func Load() (*Config, error) {
 		KafkaBrokers:           getStringSliceEnv("GATEWAY_KAFKA_BROKERS"),
 		KafkaTopic:             getEnvWithDefault("GATEWAY_KAFKA_TOPIC", "opencode-usage"),
 		KafkaClientID:          os.Getenv("GATEWAY_KAFKA_CLIENT_ID"),
+		Replay:                 truthy[strings.ToLower(os.Getenv("GATEWAY_COLLECTOR_REPLAY"))],
+		ReplaySince:            getDurationEnv("GATEWAY_COLLECTOR_REPLAY_SINCE", 0),
 	}
 
 	if err := cfg.Validate(); err != nil {

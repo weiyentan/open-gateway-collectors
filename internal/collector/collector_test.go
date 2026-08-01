@@ -1429,3 +1429,319 @@ func TestCollector_EmptyProjectionsWhenNoRecords(t *testing.T) {
 		t.Errorf("heartbeat should have 0 todo snapshots, got %d", len(req.SessionTodos))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Tests: Replay mode
+// ---------------------------------------------------------------------------
+
+func TestCollector_ReplaySendsAllRecordsAcrossBatches(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "replay-batch-001",
+		AcceptedCount: 10,
+	})
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.BatchLimit = 3 // small batch limit to test batching
+	cfg.Replay = true
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+	c.transport = mockTransport
+
+	// Set a known cursor — replay should ignore it and read all records.
+	initialCursor := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
+	if err := c.tracker.SetCursor(dbPath, initialCursor); err != nil {
+		t.Fatalf("SetCursor: %v", err)
+	}
+
+	// 10 records, batch limit 3 => 4 batches (3 + 3 + 3 + 1).
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	allRecords := makeRecords([]string{
+		"rec-1", "rec-2", "rec-3", "rec-4", "rec-5",
+		"rec-6", "rec-7", "rec-8", "rec-9", "rec-10",
+	}, now)
+
+	mock := &mockReader{records: allRecords}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+	if len(dbs) != 1 {
+		t.Fatalf("expected 1 DB, got %d", len(dbs))
+	}
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	// Verify 4 batches were sent (3+3+3+1).
+	if mockTransport.CallCount() != 4 {
+		t.Fatalf("expected 4 batches, got %d", mockTransport.CallCount())
+	}
+
+	// Verify cursor advanced to the last record's time (rec-10 has +9s offset).
+	// This implicitly confirms all 10 records were processed — the cursor
+	// is the max occurred_at across all batches.
+	cursor, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	expectedCursor := now.Add(9 * time.Second)
+	if !cursor.Equal(expectedCursor) {
+		t.Errorf("cursor = %v, want %v", cursor, expectedCursor)
+	}
+}
+
+func TestCollector_ReplayAdvancesWatermarkAfterCompletion(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "replay-cursor-001",
+		AcceptedCount: 3,
+	})
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.Replay = true
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+	c.transport = mockTransport
+
+	// Set an old cursor that should be surpassed by replay.
+	oldCursor := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := c.tracker.SetCursor(dbPath, oldCursor); err != nil {
+		t.Fatalf("SetCursor: %v", err)
+	}
+
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2", "rec-3"}, now),
+	}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, _ := c.resolveDatabases()
+	c.processDatabase(context.Background(), dbs[0])
+
+	// Cursor must have advanced past the old cursor.
+	cursor, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	// rec-3 has +2s offset from now.
+	expectedCursor := now.Add(2 * time.Second)
+	if !cursor.Equal(expectedCursor) {
+		t.Errorf("cursor = %v, want %v (must advance past old cursor %v)", cursor, expectedCursor, oldCursor)
+	}
+
+	// Also verify that on a subsequent normal iteration (simulated),
+	// no records are re-sent because cursor is past the replay window.
+	// Reset the reader to return same records (simulating source db unchanged).
+	// Process again with replay disabled.
+	cfg.Replay = false
+	c2, _ := NewCollector(cfg, "0.2.0")
+	c2.transport = mockTransport
+	c2.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+	// Copy the tracker so cursor is shared.
+	c2.tracker = c.tracker
+
+	mockTransport2 := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "normal-after-replay",
+		AcceptedCount: 0,
+	})
+	c2.transport = mockTransport2
+
+	dbs2, _ := c2.resolveDatabases()
+	c2.processDatabase(context.Background(), dbs2[0])
+
+	// After replay, the cursor should be ahead, so no new records should be sent.
+	// A heartbeat may be sent if prior success exists; either way, no records sent.
+	if mockTransport2.CallCount() > 0 {
+		lastReq := mockTransport2.LastCall().Req
+		if len(lastReq.Records) > 0 {
+			t.Errorf("expected 0 records after replay (cursor advanced), got %d", len(lastReq.Records))
+		}
+	}
+}
+
+func TestCollector_ReplayRespectsSinceCutoff(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "replay-since-001",
+		AcceptedCount: 5,
+	})
+
+	// Use a fixed reference time for deterministic cutoff testing.
+	refTime := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.Replay = true
+	cfg.ReplaySince = 2 * time.Second
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+	c.transport = mockTransport
+
+	// Override replaySince with a fixed value for deterministic testing.
+	// The cutoff is refTime (12:00:00), so records after 12:00:00 are included.
+	// Records: refTime-3s, refTime-2s, refTime-1s, refTime, refTime+1s.
+	// Only records with time > refTime are included: rec-4 (refTime+1s? no...
+	// Wait: cutoff = refTime.Add(-2s) = 11:59:58.
+	// The replaySince is set to refTime.Add(-2s) = 11:59:58.
+	c.replaySince = refTime.Add(-2 * time.Second) // 11:59:58
+
+	// Records: [11:59:57, 11:59:58, 11:59:59, 12:00:00, 12:00:01]
+	// After cutoff (11:59:58): rec-3(11:59:59), rec-4(12:00:00), rec-5(12:00:01) = 3 records.
+	baseTime := refTime.Add(-3 * time.Second) // 11:59:57
+
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2", "rec-3", "rec-4", "rec-5"}, baseTime),
+	}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, _ := c.resolveDatabases()
+	c.processDatabase(context.Background(), dbs[0])
+
+	// Verify only 3 records were sent (rec-3, rec-4, rec-5).
+	if mockTransport.CallCount() == 0 {
+		t.Fatal("expected at least 1 batch")
+	}
+	req := mockTransport.LastCall().Req
+	if len(req.Records) != 3 {
+		t.Errorf("expected 3 records (rec-3, rec-4, rec-5 matched since cutoff), got %d", len(req.Records))
+	}
+
+	// Verify the included records have the correct IDs.
+	expectedIDs := map[string]bool{"rec-3": true, "rec-4": true, "rec-5": true}
+	for _, rec := range req.Records {
+		if !expectedIDs[rec.SourceRecordID] {
+			t.Errorf("unexpected record in batch: %s", rec.SourceRecordID)
+		}
+	}
+}
+
+func TestCollector_ReplaySendsSessionContexts(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "replay-proj-001",
+		AcceptedCount: 2,
+	})
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.Replay = true
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+	c.transport = mockTransport
+
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2"}, now),
+		sessionCtxs: []sqlite.SessionContextData{
+			{ExternalSessionID: "sess-rec-1", Agent: "claude", Model: "gpt-4"},
+			{ExternalSessionID: "sess-rec-2", Agent: "codex", Model: "gpt-4o"},
+		},
+		projects: []sqlite.ProjectData{
+			{ExternalProjectID: "proj-1", Name: "Replay Project"},
+		},
+	}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, _ := c.resolveDatabases()
+	c.processDatabase(context.Background(), dbs[0])
+
+	if mockTransport.CallCount() != 1 {
+		t.Fatalf("expected 1 batch, got %d", mockTransport.CallCount())
+	}
+
+	req := mockTransport.LastCall().Req
+
+	// Verify session contexts were included.
+	if len(req.SessionContexts) != 2 {
+		t.Errorf("expected 2 session contexts, got %d", len(req.SessionContexts))
+	}
+	// Verify project snapshots were included.
+	if len(req.Projects) != 1 {
+		t.Errorf("expected 1 project snapshot, got %d", len(req.Projects))
+	}
+}
+
+func TestCollector_ReplayNotTriggeredWithoutExplicitConfig(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "normal-batch",
+		AcceptedCount: 2,
+	})
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	// Replay is NOT set (default false).
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+	c.transport = mockTransport
+
+	// Set a cursor at latest record — no new records should be returned.
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	cursorAtLatest := now.Add(10 * time.Second) // beyond all records
+	if err := c.tracker.SetCursor(dbPath, cursorAtLatest); err != nil {
+		t.Fatalf("SetCursor: %v", err)
+	}
+
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2"}, now),
+	}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, _ := c.resolveDatabases()
+	c.processDatabase(context.Background(), dbs[0])
+
+	// In normal mode (replay=false), with cursor beyond all records,
+	// no records should be sent. This confirms replay is not accidentally triggered.
+	if mockTransport.CallCount() > 0 {
+		req := mockTransport.LastCall().Req
+		if len(req.Records) > 0 {
+			t.Errorf("expected 0 records in normal mode (cursor beyond records), got %d", len(req.Records))
+		}
+	}
+}
