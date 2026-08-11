@@ -25,10 +25,29 @@ func main() {
 	// -version flag prints version and exits before any other setup.
 	showVersion := flag.Bool("version", false, "print version and exit")
 	replayFlag := flag.Bool("replay", false, "enable replay mode — re-read and re-send all historical records")
+	replayUntilFlag := flag.String("replay-until", "", "upper bound for the replay window as an RFC3339 timestamp; overrides GATEWAY_COLLECTOR_REPLAY_UNTIL")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("opencode-collector v" + Version)
 		os.Exit(0)
+	}
+
+	// -replay-until CLI flag overwrites the env var — an explicit bound
+	// wins. When the flag is set, the env value is not consulted at all
+	// (an invalid GATEWAY_COLLECTOR_REPLAY_UNTIL cannot fail startup).
+	// The flag value is validated here, before config.Load(), so the
+	// failure names the flag as the source.
+	var replayUntilOverride time.Time
+	var hasReplayUntilOverride bool
+	if *replayUntilFlag != "" {
+		var err error
+		replayUntilOverride, err = config.ParseReplayUntil(*replayUntilFlag)
+		if err != nil {
+			slog.Error("failed to load configuration", "error", fmt.Errorf("invalid value for -replay-until: %w", err))
+			os.Exit(1)
+		}
+		os.Unsetenv("GATEWAY_COLLECTOR_REPLAY_UNTIL")
+		hasReplayUntilOverride = true
 	}
 
 	// Load configuration from environment variables.
@@ -41,6 +60,11 @@ func main() {
 	// -replay CLI flag overwrites the env var — explicit trigger wins.
 	if *replayFlag {
 		cfg.Replay = true
+	}
+
+	// Apply the validated flag value (the env value was excluded above).
+	if hasReplayUntilOverride {
+		cfg.ReplayUntil = replayUntilOverride
 	}
 
 	// Create the collector — wires all components together and resolves
