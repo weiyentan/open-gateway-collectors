@@ -59,10 +59,12 @@ type Reader interface {
 // It uses a read-only connection with a prepared statement for efficient
 // cursor-based incremental reads.
 type OpenCodeReader struct {
-	db       *sql.DB
-	stmt     *sql.Stmt
-	stmtAfter *sql.Stmt
-	dbInfo   *DatabaseInfo
+	db            *sql.DB
+	stmt          *sql.Stmt
+	stmtAfter     *sql.Stmt
+	stmtWindow    *sql.Stmt
+	stmtWindowAfter *sql.Stmt
+	dbInfo        *DatabaseInfo
 }
 
 // NewOpenCodeReader opens an OpenCode SQLite database in read-only mode,
@@ -113,7 +115,51 @@ func NewOpenCodeReader(dbPath string) (*OpenCodeReader, error) {
 		return nil, fmt.Errorf("preparing after statement: %w", err)
 	}
 
-	return &OpenCodeReader{db: db, stmt: stmt, stmtAfter: stmtAfter}, nil
+	// Bounded window read — first page uses a strict time-only lower bound
+	// (m.time_updated > since). A zero until (bound as 0) means no upper
+	// bound; otherwise the bound is inclusive (m.time_updated <= until).
+	stmtWindow, err := db.Prepare(`
+		SELECT
+			m.id, m.session_id, m.time_created, m.time_updated, m.data,
+			s.time_created, s.time_updated, s.project_id, s.parent_id,
+			s.workspace_id, s.agent
+		FROM message m
+		JOIN session s ON s.id = m.session_id
+		WHERE m.time_updated > ?
+		  AND (? = 0 OR m.time_updated <= ?)
+		  AND json_extract(m.data, '$.tokens.input') IS NOT NULL
+		ORDER BY m.time_updated ASC, m.id ASC
+		LIMIT ?`)
+	if err != nil {
+		_ = stmt.Close()
+		_ = stmtAfter.Close()
+		db.Close()
+		return nil, fmt.Errorf("preparing window statement: %w", err)
+	}
+
+	// Bounded window read continuation — composite (time_updated, id) lower
+	// bound for tie-safe paging within the same window.
+	stmtWindowAfter, err := db.Prepare(`
+		SELECT
+			m.id, m.session_id, m.time_created, m.time_updated, m.data,
+			s.time_created, s.time_updated, s.project_id, s.parent_id,
+			s.workspace_id, s.agent
+		FROM message m
+		JOIN session s ON s.id = m.session_id
+		WHERE (m.time_updated, m.id) > (?, ?)
+		  AND (? = 0 OR m.time_updated <= ?)
+		  AND json_extract(m.data, '$.tokens.input') IS NOT NULL
+		ORDER BY m.time_updated ASC, m.id ASC
+		LIMIT ?`)
+	if err != nil {
+		_ = stmt.Close()
+		_ = stmtAfter.Close()
+		_ = stmtWindow.Close()
+		db.Close()
+		return nil, fmt.Errorf("preparing window after statement: %w", err)
+	}
+
+	return &OpenCodeReader{db: db, stmt: stmt, stmtAfter: stmtAfter, stmtWindow: stmtWindow, stmtWindowAfter: stmtWindowAfter}, nil
 }
 
 // WithSchemaInfo attaches the DatabaseInfo from OpenAndInspect so the reader
@@ -154,6 +200,47 @@ func (r *OpenCodeReader) ReadRecordsAfter(since time.Time, afterID string, limit
 	rows, err := r.stmtAfter.Query(sinceMs, afterID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("querying records after: %w", err)
+	}
+	defer rows.Close()
+
+	return scanRecords(rows)
+}
+
+// ReadRecordsWindow returns usage records within a bounded time window,
+// ordered by (time_updated ASC, id ASC), up to limit records.
+//
+// The since bound is strict: records with time_updated == since are
+// excluded, records with time_updated > since are included. The until
+// bound is inclusive: records with time_updated <= until are included.
+// A zero-value until means no upper bound.
+//
+// afterID continues a tie-safe composite page: when non-empty, the lower
+// bound becomes the composite key (time_updated, id) of the last record
+// returned by the previous page (pass that record's OccurredAt as since
+// and its SourceRecordID as afterID). Records sharing the same
+// time_updated are therefore each returned exactly once across pages.
+// An empty afterID starts a fresh window from the strict since bound.
+func (r *OpenCodeReader) ReadRecordsWindow(since time.Time, until time.Time, afterID string, limit int) ([]UsageRecord, error) {
+	sinceMs := since.UnixMilli()
+	untilMs := int64(0)
+	if !until.IsZero() {
+		untilMs = until.UnixMilli()
+	}
+
+	// Continuation pages use the composite (time_updated, id) lower bound so
+	// records sharing the same time_updated are each returned exactly once.
+	if afterID != "" {
+		rows, err := r.stmtWindowAfter.Query(sinceMs, afterID, untilMs, untilMs, limit)
+		if err != nil {
+			return nil, fmt.Errorf("querying records window after: %w", err)
+		}
+		defer rows.Close()
+		return scanRecords(rows)
+	}
+
+	rows, err := r.stmtWindow.Query(sinceMs, untilMs, untilMs, limit)
+	if err != nil {
+		return nil, fmt.Errorf("querying records window: %w", err)
 	}
 	defer rows.Close()
 
@@ -205,6 +292,12 @@ func (r *OpenCodeReader) Close() error {
 	}
 	if r.stmtAfter != nil {
 		_ = r.stmtAfter.Close()
+	}
+	if r.stmtWindow != nil {
+		_ = r.stmtWindow.Close()
+	}
+	if r.stmtWindowAfter != nil {
+		_ = r.stmtWindowAfter.Close()
 	}
 	return r.db.Close()
 }

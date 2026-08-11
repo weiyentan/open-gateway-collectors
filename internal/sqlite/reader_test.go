@@ -1295,4 +1295,234 @@ func TestReadRecordsAfterCompositePaging(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Bounded window read tests (ReadRecordsWindow)
+// ---------------------------------------------------------------------------
+
+func TestReadRecordsWindow_ExactLowerBoundary(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", parentID: "", workspaceID: "ws-1", agent: "claude", model: ""},
+	}
+	messages := []messageRow{
+		{id: "msg-at-since", sessionID: "sess-a", timeCreated: tsBase, timeUpdated: tsBase, data: assistantFullUsage},
+		{id: "msg-after-1", sessionID: "sess-a", timeCreated: tsBase + tsStep, timeUpdated: tsBase + tsStep, data: partialUsage},
+		{id: "msg-after-2", sessionID: "sess-a", timeCreated: tsBase + 2*tsStep, timeUpdated: tsBase + 2*tsStep, data: zeroCostUsage},
+	}
+
+	dbPath := createTestDB(t, sessions, messages)
+
+	r, err := NewOpenCodeReader(dbPath)
+	if err != nil {
+		t.Fatalf("NewOpenCodeReader failed: %v", err)
+	}
+	defer r.Close()
+
+	// since == tsBase must EXCLUDE the record at tsBase and include later
+	// ones. A zero until means no upper bound.
+	records, err := r.ReadRecordsWindow(time.UnixMilli(tsBase), time.Time{}, "", 100)
+	if err != nil {
+		t.Fatalf("ReadRecordsWindow failed: %v", err)
+	}
+
+	if len(records) != 2 {
+		t.Fatalf("expected 2 records strictly after since, got %d", len(records))
+	}
+	if records[0].SourceRecordID != "msg-after-1" {
+		t.Errorf("first record = %s, want msg-after-1", records[0].SourceRecordID)
+	}
+	if records[1].SourceRecordID != "msg-after-2" {
+		t.Errorf("second record = %s, want msg-after-2", records[1].SourceRecordID)
+	}
+}
+
+func TestReadRecordsWindow_ExactUpperBoundary(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", parentID: "", workspaceID: "ws-1", agent: "claude", model: ""},
+	}
+	messages := []messageRow{
+		{id: "msg-t0", sessionID: "sess-a", timeCreated: tsBase, timeUpdated: tsBase, data: assistantFullUsage},
+		{id: "msg-t1", sessionID: "sess-a", timeCreated: tsBase + tsStep, timeUpdated: tsBase + tsStep, data: partialUsage},
+		{id: "msg-t2", sessionID: "sess-a", timeCreated: tsBase + 2*tsStep, timeUpdated: tsBase + 2*tsStep, data: zeroCostUsage},
+		{id: "msg-t3", sessionID: "sess-a", timeCreated: tsBase + 3*tsStep, timeUpdated: tsBase + 3*tsStep, data: assistantUsageAnother},
+	}
+
+	dbPath := createTestDB(t, sessions, messages)
+
+	r, err := NewOpenCodeReader(dbPath)
+	if err != nil {
+		t.Fatalf("NewOpenCodeReader failed: %v", err)
+	}
+	defer r.Close()
+
+	// since below the first record, until == tsBase + 2*tsStep (inclusive):
+	// msg-t0, msg-t1, msg-t2 included; msg-t3 excluded.
+	records, err := r.ReadRecordsWindow(time.UnixMilli(tsBase-tsStep), time.UnixMilli(tsBase+2*tsStep), "", 100)
+	if err != nil {
+		t.Fatalf("ReadRecordsWindow failed: %v", err)
+	}
+
+	if len(records) != 3 {
+		t.Fatalf("expected 3 records in window (until inclusive), got %d", len(records))
+	}
+	expected := []string{"msg-t0", "msg-t1", "msg-t2"}
+	for i, rec := range records {
+		if rec.SourceRecordID != expected[i] {
+			t.Errorf("position %d: record = %s, want %s", i, rec.SourceRecordID, expected[i])
+		}
+	}
+}
+
+func TestReadRecordsWindow_ZeroUntilHasNoUpperBound(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", parentID: "", workspaceID: "ws-1", agent: "claude", model: ""},
+	}
+	messages := []messageRow{
+		{id: "msg-t0", sessionID: "sess-a", timeCreated: tsBase, timeUpdated: tsBase, data: assistantFullUsage},
+		{id: "msg-t1", sessionID: "sess-a", timeCreated: tsBase + tsStep, timeUpdated: tsBase + tsStep, data: partialUsage},
+		{id: "msg-t2", sessionID: "sess-a", timeCreated: tsBase + 2*tsStep, timeUpdated: tsBase + 2*tsStep, data: zeroCostUsage},
+	}
+
+	dbPath := createTestDB(t, sessions, messages)
+
+	r, err := NewOpenCodeReader(dbPath)
+	if err != nil {
+		t.Fatalf("NewOpenCodeReader failed: %v", err)
+	}
+	defer r.Close()
+
+	// Zero until must behave as no upper bound: all records after since.
+	records, err := r.ReadRecordsWindow(time.UnixMilli(tsBase-tsStep), time.Time{}, "", 100)
+	if err != nil {
+		t.Fatalf("ReadRecordsWindow failed: %v", err)
+	}
+
+	if len(records) != 3 {
+		t.Fatalf("expected 3 records with zero until (no upper bound), got %d", len(records))
+	}
+}
+
+func TestReadRecordsWindow_EmptyWindow(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", parentID: "", workspaceID: "ws-1", agent: "claude", model: ""},
+	}
+	messages := []messageRow{
+		{id: "msg-t0", sessionID: "sess-a", timeCreated: tsBase, timeUpdated: tsBase, data: assistantFullUsage},
+		{id: "msg-t1", sessionID: "sess-a", timeCreated: tsBase + tsStep, timeUpdated: tsBase + tsStep, data: partialUsage},
+	}
+
+	dbPath := createTestDB(t, sessions, messages)
+
+	r, err := NewOpenCodeReader(dbPath)
+	if err != nil {
+		t.Fatalf("NewOpenCodeReader failed: %v", err)
+	}
+	defer r.Close()
+
+	// since == until: the strict lower bound excludes the record at since,
+	// so the window is empty (record at tsBase+tsStep is beyond until).
+	records, err := r.ReadRecordsWindow(time.UnixMilli(tsBase), time.UnixMilli(tsBase), "", 100)
+	if err != nil {
+		t.Fatalf("ReadRecordsWindow failed: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("expected 0 records in empty window, got %d", len(records))
+	}
+
+	// until before since: also empty, no error.
+	records2, err := r.ReadRecordsWindow(time.UnixMilli(tsBase+tsStep), time.UnixMilli(tsBase), "", 100)
+	if err != nil {
+		t.Fatalf("ReadRecordsWindow with until < since failed: %v", err)
+	}
+	if len(records2) != 0 {
+		t.Fatalf("expected 0 records when until < since, got %d", len(records2))
+	}
+}
+
+func TestReadRecordsWindow_TieSafePagingAtUntil(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", parentID: "", workspaceID: "ws-1", agent: "claude", model: ""},
+	}
+	// 5 records tied at tsBase (the until boundary) plus 1 record after until.
+	messages := []messageRow{
+		{id: "tie-a", sessionID: "sess-a", timeCreated: tsBase, timeUpdated: tsBase, data: assistantFullUsage},
+		{id: "tie-b", sessionID: "sess-a", timeCreated: tsBase + 1, timeUpdated: tsBase, data: partialUsage},
+		{id: "tie-c", sessionID: "sess-a", timeCreated: tsBase + 2, timeUpdated: tsBase, data: zeroCostUsage},
+		{id: "tie-d", sessionID: "sess-a", timeCreated: tsBase + 3, timeUpdated: tsBase, data: assistantUsageAnother},
+		{id: "tie-e", sessionID: "sess-a", timeCreated: tsBase + 4, timeUpdated: tsBase, data: assistantFullUsage},
+		{id: "msg-late", sessionID: "sess-a", timeCreated: tsBase + tsStep, timeUpdated: tsBase + tsStep, data: partialUsage},
+	}
+
+	dbPath := createTestDB(t, sessions, messages)
+
+	r, err := NewOpenCodeReader(dbPath)
+	if err != nil {
+		t.Fatalf("NewOpenCodeReader failed: %v", err)
+	}
+	defer r.Close()
+
+	batchLimit := 2
+	collected := make(map[string]bool)
+
+	// Page 1: strict since, ties start at tsBase which equals until.
+	page1, err := r.ReadRecordsWindow(time.UnixMilli(tsBase-tsStep), time.UnixMilli(tsBase), "", batchLimit)
+	if err != nil {
+		t.Fatalf("ReadRecordsWindow page 1: %v", err)
+	}
+	if len(page1) != 2 {
+		t.Fatalf("page 1: expected 2 records, got %d", len(page1))
+	}
+	for _, rec := range page1 {
+		if collected[rec.SourceRecordID] {
+			t.Errorf("page 1: duplicate record %s", rec.SourceRecordID)
+		}
+		collected[rec.SourceRecordID] = true
+	}
+
+	// Pages 2-4: composite continuation (time_updated, id) of the last record.
+	last := page1[len(page1)-1]
+	for page := 2; page <= 4; page++ {
+		records, err := r.ReadRecordsWindow(last.OccurredAt, time.UnixMilli(tsBase), last.SourceRecordID, batchLimit)
+		if err != nil {
+			t.Fatalf("ReadRecordsWindow page %d: %v", page, err)
+		}
+		for _, rec := range records {
+			if collected[rec.SourceRecordID] {
+				t.Errorf("page %d: duplicate record %s", page, rec.SourceRecordID)
+			}
+			if rec.SourceRecordID == "msg-late" {
+				t.Errorf("page %d: record after until was returned", page)
+			}
+			collected[rec.SourceRecordID] = true
+		}
+		if len(records) > 0 {
+			last = records[len(records)-1]
+		}
+	}
+
+	// Final page: everything in the window has been consumed.
+	final, err := r.ReadRecordsWindow(last.OccurredAt, time.UnixMilli(tsBase), last.SourceRecordID, batchLimit)
+	if err != nil {
+		t.Fatalf("ReadRecordsWindow final page: %v", err)
+	}
+	if len(final) != 0 {
+		t.Errorf("final page: expected 0 records, got %d", len(final))
+	}
+
+	// All 5 tied records at until returned exactly once; msg-late excluded.
+	expectedIDs := []string{"tie-a", "tie-b", "tie-c", "tie-d", "tie-e"}
+	for _, id := range expectedIDs {
+		if !collected[id] {
+			t.Errorf("record %s was never collected (dropped)", id)
+		}
+	}
+	if len(collected) != len(expectedIDs) {
+		t.Errorf("expected %d unique records, got %d", len(expectedIDs), len(collected))
+	}
+}
+
 
