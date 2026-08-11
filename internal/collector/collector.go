@@ -50,6 +50,11 @@ type Collector struct {
 	// Zero time means full history. Only meaningful when cfg.Replay is true.
 	replaySince time.Time
 
+	// replayUntil bounds the replay window at the upper end. Records with
+	// time_updated > replayUntil are excluded from the replay pass.
+	// Zero time means no upper bound. Only meaningful when cfg.Replay is true.
+	replayUntil time.Time
+
 	// replayCompleted tracks databases that have completed replay mode.
 	// In replay mode, each database is replayed once per process lifetime.
 	// The replay pass is skipped on subsequent poll cycles after completion.
@@ -104,7 +109,27 @@ func NewCollector(cfg *config.Config, version string) (*Collector, error) {
 		} else {
 			logger.Info("replay mode enabled — full history")
 		}
+		if !cfg.ReplayUntil.IsZero() {
+			logger.Info("replay bounded by upper limit",
+				"replay_until", cfg.ReplayUntil.Format(time.RFC3339),
+			)
+		}
 	}
+
+	// Validate that replay-until is after the effective since. When both
+	// replay-until and replay-since are set, a replay bound that ends before
+	// it begins is always a misconfiguration — fail startup with a clear
+	// message naming both values.
+	if cfg.Replay && !cfg.ReplayUntil.IsZero() && !replaySince.IsZero() && !cfg.ReplayUntil.After(replaySince) {
+		return nil, fmt.Errorf(
+			"replay-until %s must be after replay-since %s (effective: %s)",
+			cfg.ReplayUntil.Format(time.RFC3339),
+			cfg.ReplaySince.String(),
+			replaySince.Format(time.RFC3339),
+		)
+	}
+
+	replayUntil := cfg.ReplayUntil
 
 	tracker, err := state.NewTracker(cfg.CursorDir)
 	if err != nil {
@@ -139,6 +164,7 @@ func NewCollector(cfg *config.Config, version string) (*Collector, error) {
 		batchLimit:      cfg.BatchLimit,
 		newReader:       defaultReaderFactory,
 		replaySince:     replaySince,
+		replayUntil:     replayUntil,
 		replayCompleted: make(map[string]bool),
 	}, nil
 }
@@ -411,8 +437,8 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 	for {
 		var records []sqlite.UsageRecord
 		var err error
-		if useReplay && effectiveLastID != "" {
-			records, err = reader.ReadRecordsAfter(effectiveSince, effectiveLastID, c.batchLimit)
+		if useReplay {
+			records, err = reader.ReadRecordsWindow(effectiveSince, c.replayUntil, effectiveLastID, c.batchLimit)
 		} else {
 			records, err = reader.ReadRecords(effectiveSince, c.batchLimit)
 		}
@@ -437,6 +463,13 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 				// normal incremental mode.
 				// Mark replay done so subsequent poll cycles skip replay.
 				finalCursor := effectiveSince
+				// Clamp to replay-until so the cursor does not
+				// advance past the bounded upper window —
+				// normal polling will pick up records newer
+				// than until after replay completes.
+				if !c.replayUntil.IsZero() && finalCursor.After(c.replayUntil) {
+					finalCursor = c.replayUntil
+				}
 				if c.replaySince.After(cursor) {
 					finalCursor = cursor
 				} else if finalCursor.Before(cursor) {
@@ -515,6 +548,13 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 			// the stored cursor leaves them readable by normal
 			// incremental mode.
 			finalCursor := lastRecord(records).OccurredAt
+			// Clamp to replay-until so the cursor does not
+			// advance past the bounded upper window —
+			// normal polling will pick up records newer
+			// than until after replay completes.
+			if !c.replayUntil.IsZero() && finalCursor.After(c.replayUntil) {
+				finalCursor = c.replayUntil
+			}
 			if c.replaySince.After(cursor) {
 				finalCursor = cursor
 			} else if finalCursor.Before(cursor) {

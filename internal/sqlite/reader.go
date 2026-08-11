@@ -31,6 +31,15 @@ type Reader interface {
 	// for the first page of a tied-timestamp window.
 	ReadRecordsAfter(since time.Time, afterID string, limit int) ([]UsageRecord, error)
 
+	// ReadRecordsWindow returns usage records within a bounded time window,
+	// ordered by (time_updated ASC, id ASC), up to limit records.
+	// The since bound is strict (>, not >=). The until bound is inclusive
+	// (<= until). A zero-value until means no upper bound.
+	// afterID continues a tie-safe composite page: when non-empty, the
+	// lower bound becomes the composite key (time_updated, id) of the
+	// last record returned by the previous page.
+	ReadRecordsWindow(since time.Time, until time.Time, afterID string, limit int) ([]UsageRecord, error)
+
 	// ReadSessionContexts returns session context data for the given session
 	// IDs. If the session table lacks expected columns, those fields are
 	// left at their zero values. Returns an empty slice (not error) for
