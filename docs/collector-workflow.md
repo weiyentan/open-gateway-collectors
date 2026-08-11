@@ -127,7 +127,7 @@ Client-side filters — such as omitting blank or whitespace-only **Project Dire
 - **Kafka transport** (`GATEWAY_COLLECTOR_TRANSPORT=kafka`): The batch is produced to Kafka before the Gateway validates it, so a 422-rejected batch moves the message to the consumer DLQ. The collector's Cursor has already advanced past it because the produce acknowledgement succeeded, so the records will not be re-sent by normal incremental reads. Run a collector **Replay** (see ADR-0008) to backfill them.
 - **HTTP transport** (default, `GATEWAY_COLLECTOR_TRANSPORT=http`): A 422 is non-retryable, the collector does NOT advance the Cursor on error, and the batch will be re-sent by normal incremental reads on the next cycle. No DLQ exists, and Replay is not needed.
 
-To backfill records after deployment, run a collector **Replay** (see ADR-0008): start with `-replay` or `GATEWAY_COLLECTOR_REPLAY=true`, optionally bounded with `GATEWAY_COLLECTOR_REPLAY_SINCE` / `GATEWAY_COLLECTOR_REPLAY_UNTIL`. Replay re-reads Source Database history past the Cursor and re-sends records and projections through the normal ingest pipeline; the Gateway's idempotent upserts make re-sending safe.
+To backfill records lost via the Kafka transport's DLQ after deployment, run a collector **Replay** (see ADR-0008): start with `-replay` or `GATEWAY_COLLECTOR_REPLAY=true`, optionally bounded with `GATEWAY_COLLECTOR_REPLAY_SINCE` / `GATEWAY_COLLECTOR_REPLAY_UNTIL`. Replay re-reads Source Database history past the Cursor and re-sends records and projections through the normal ingest pipeline; the Gateway's idempotent upserts make re-sending safe.
 
 ## ADR References
 
