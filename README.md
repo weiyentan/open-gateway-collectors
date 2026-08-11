@@ -45,13 +45,16 @@ Each collector:
 | `GATEWAY_COLLECTOR_CURSOR_DIR` | No | Working directory | Directory for cursor state file persistence |
 | `GATEWAY_COLLECTOR_REPLAY` | No | `false` | Enable replay mode — re-read and re-send all historical records past the stored cursor |
 | `GATEWAY_COLLECTOR_REPLAY_SINCE` | No | `0` (full history) | Bounds replay to records newer than `time.Now().Add(-duration)`. Accepts Go duration strings (e.g. `720h`, `30m`). Zero means full history. Only used when Replay is enabled. |
+| `GATEWAY_COLLECTOR_REPLAY_UNTIL` | No | unset (no upper bound) | Upper bound for the replay window — re-reads records with `time_updated` up to and including this timestamp. Must be a strict RFC3339 timestamp (e.g. `2026-08-11T12:00:00Z`; UTC recommended); an invalid value fails startup naming the variable. Overridden by the `-replay-until` CLI flag. Only used when Replay is enabled. |
 
 ### Replay Mode
 
 Replay is a one-shot, explicitly-triggered operational mode that forces a re-read of Source Database history past the stored cursor and re-sends records (with their projection snapshots) through the normal ingest pipeline — useful for backfilling historical data after a collector field fix.
 
-- **Trigger:** the `-replay` CLI flag (force-enables replay; it cannot disable an environment-enabled replay) or `GATEWAY_COLLECTOR_REPLAY=true`. Replay never runs without an explicit trigger.
-- **Window:** `GATEWAY_COLLECTOR_REPLAY_SINCE` bounds replay to records newer than `time.Now().Add(-duration)`; the default (`0`) replays full history.
+- **Trigger:** the `-replay` CLI flag (force-enables replay; it cannot disable an environment-enabled replay) or `GATEWAY_COLLECTOR_REPLAY=true`. Replay never runs without an explicit trigger — bounds alone never activate it.
+- **Lower bound (`since`, strict):** `GATEWAY_COLLECTOR_REPLAY_SINCE` bounds replay to records newer than `time.Now().Add(-duration)`; the default (`0`) replays full history. The `since` bound is **strict**: records whose `time_updated` equals the bound are excluded, only records strictly newer are re-read.
+- **Upper bound (`until`, inclusive):** `GATEWAY_COLLECTOR_REPLAY_UNTIL` (or the `-replay-until` CLI flag, which overrides the env var) bounds replay to records with `time_updated <= until` — the bound is **inclusive**. The value must be a strict RFC3339 timestamp, e.g. `2026-08-11T12:00:00Z`; UTC is recommended (offset forms parse, but UTC avoids ambiguity). Unset means no upper bound. An invalid value fails startup naming the flag or variable as its source. When both bounds are set, `until` must be strictly after the effective `since`, otherwise startup fails with both values named.
+- **Cursor safety:** the stored cursor advances only after the replay pass completes. It is clamped so it never advances past `until` (normal polling then resumes and picks up records newer than the bound) and never regresses below the pre-replay stored cursor. An empty replay window sends nothing and leaves the cursor at the stored cursor; the heartbeat path is preserved on the replay-complete pass. On a failed batch, the cursor is rewound to the replay start (clamped to the stored cursor) so the window is re-read on the next cycle.
 - **After completion:** the stored cursor advances past the replayed records, so subsequent runs resume normal incremental reads — replay is not repeated on every cycle.
 
 ## Quick Start
@@ -163,7 +166,8 @@ This project requires Go 1.25 or later. The module path is `github.com/opencode-
 | Flag | Description |
 |------|-------------|
 | `-version` | Print the collector version (`dev` for development builds) and exit |
-| `-replay` | Enable replay mode — re-read and re-send all historical records past the stored cursor. Forces replay on; it cannot turn replay off when `GATEWAY_COLLECTOR_REPLAY=true` is already set in the environment. Use with `GATEWAY_COLLECTOR_REPLAY_SINCE` to bound the replay window. |
+| `-replay` | Enable replay mode — re-read and re-send all historical records past the stored cursor. Forces replay on; it cannot turn replay off when `GATEWAY_COLLECTOR_REPLAY=true` is already set in the environment. Use with `GATEWAY_COLLECTOR_REPLAY_SINCE` / `-replay-until` to bound the replay window. |
+| `-replay-until` | Upper bound for the replay window as a strict RFC3339 timestamp (e.g. `2026-08-11T12:00:00Z`; UTC recommended). Overrides `GATEWAY_COLLECTOR_REPLAY_UNTIL` — when set, the env value is not consulted (an invalid env value cannot fail startup). Only used when replay is enabled. |
 
 ### Dependencies
 

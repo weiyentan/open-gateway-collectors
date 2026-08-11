@@ -30,7 +30,7 @@
 
 **Cursor** — A persisted timestamp indicating the last processed `message.time_updated` value for a source database. Enables incremental reads across collector restarts. *Avoid: "checkpoint", "watermark"*
 
-**Replay** — An explicit collector mode that re-reads Source Database history past the Cursor and re-sends records and projections through the normal ingest pipeline. Used to backfill fields that were dropped or misnamed by an older collector version; the Gateway's idempotent upserts make re-sending safe. The Cursor advances after Replay completes so normal incremental runs resume. *Avoid: "rebuild", "resync"*
+**Replay** — An explicit collector mode that re-reads Source Database history past the Cursor and re-sends records and projections through the normal ingest pipeline. Used to backfill fields that were dropped or misnamed by an older collector version; the Gateway's idempotent upserts make re-sending safe. Replay runs within a bounded window: the lower bound (`since`, strict) is the Cursor or an explicit start time — records whose `time_updated` equals the bound are excluded, only records strictly newer are re-read — and the optional upper bound (`until`, inclusive) includes records with `time_updated <= until`, with an unset `until` meaning no upper bound. Bounds are strict RFC3339 timestamps (e.g. `2026-08-11T12:00:00Z`; UTC recommended) and invalid values fail startup. Replay never runs without an explicit trigger (the `-replay` CLI flag or `GATEWAY_COLLECTOR_REPLAY=true`). The Cursor advances only after Replay completes, clamped to `until` and never regressing below the pre-replay stored Cursor; on a failed batch the Cursor is rewound to the replay start so the window is re-read, and normal incremental runs resume from the Cursor once the window is exhausted. *Avoid: "rebuild", "resync"*
 
 **Canonical Record** — The single authoritative shape for a usage record, derived from the OpenCode assistant `message.data` JSON. Defined in ADR-0002.
 
@@ -56,6 +56,7 @@
 - A **Usage Record** is sent in an **Ingest Batch** to the **Gateway**.
 - An **Ingest Batch** is identified by a **Batch ID** (UUID) returned by the Gateway.
 - The **Idempotency Key** spans **Collector** (via client identity) → **Source Database** → **Usage Record**.
+- A **Replay** window is bounded by the **Cursor** or an explicit **since** time (strict lower bound) and an optional **until** timestamp (inclusive upper bound); the **Cursor** advances only after **Replay** completes.
 
 ## Example dialogue
 
