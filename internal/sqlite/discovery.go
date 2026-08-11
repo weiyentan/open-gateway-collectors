@@ -206,4 +206,3 @@ func detectOptionalTable(db *sql.DB, name string) (bool, []string) {
 	}
 	return true, columns
 }
-

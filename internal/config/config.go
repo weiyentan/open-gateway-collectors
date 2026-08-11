@@ -97,11 +97,11 @@ type Config struct {
 // It returns an error if required fields are missing or invalid.
 func Load() (*Config, error) {
 	cfg := &Config{
-		Token:             os.Getenv("GATEWAY_COLLECTOR_TOKEN"),
-		BaseURL:           os.Getenv("GATEWAY_BASE_URL"),
-		PollInterval:      getDurationEnv("GATEWAY_COLLECTOR_POLL_INTERVAL", 60*time.Second),
-		HeartbeatInterval: getDurationEnv("GATEWAY_COLLECTOR_HEARTBEAT_INTERVAL", 120*time.Second),
-		BatchLimit:        getIntEnv("GATEWAY_COLLECTOR_BATCH_LIMIT", defaultBatchLimit),
+		Token:                  os.Getenv("GATEWAY_COLLECTOR_TOKEN"),
+		BaseURL:                os.Getenv("GATEWAY_BASE_URL"),
+		PollInterval:           getDurationEnv("GATEWAY_COLLECTOR_POLL_INTERVAL", 60*time.Second),
+		HeartbeatInterval:      getDurationEnv("GATEWAY_COLLECTOR_HEARTBEAT_INTERVAL", 120*time.Second),
+		BatchLimit:             getIntEnv("GATEWAY_COLLECTOR_BATCH_LIMIT", defaultBatchLimit),
 		SQLitePath:             os.Getenv("GATEWAY_COLLECTOR_SQLITE_PATH"),
 		SQLiteDir:              getEnvWithDefault("GATEWAY_COLLECTOR_SQLITE_DIR", defaultSQLiteDir()),
 		LogLevel:               getEnvWithDefault("GATEWAY_COLLECTOR_LOG_LEVEL", "info"),

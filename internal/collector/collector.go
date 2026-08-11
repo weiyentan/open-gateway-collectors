@@ -21,6 +21,10 @@ import (
 	"github.com/opencode-gateway/collectors/internal/state"
 )
 
+// now returns the current time. It is a package-level variable so tests
+// can override it to make time-dependent validation deterministic.
+var now = time.Now
+
 // readerFactory creates a sqlite.Reader for the given database path along
 // with a close function. The dbInfo parameter carries schema detection
 // results from OpenAndInspect so the reader can be schema-aware.
@@ -93,10 +97,10 @@ func NewCollector(cfg *config.Config, version string) (*Collector, error) {
 
 	// Compute the replay since time from config. Zero ReplaySince means full
 	// history (zero time). A non-zero value means replay records newer than
-	// time.Now().Add(-ReplaySince).
+	// now().Add(-ReplaySince).
 	var replaySince time.Time
 	if cfg.Replay && cfg.ReplaySince > 0 {
-		replaySince = time.Now().Add(-cfg.ReplaySince)
+		replaySince = now().Add(-cfg.ReplaySince)
 	}
 
 	// Log replay configuration if enabled.
@@ -427,7 +431,7 @@ func (c *Collector) processDatabase(ctx context.Context, db dbIdentity) {
 	defer closeFn()
 
 	// effectiveLastID is the secondary key for tie-safe composite paging.
-	// When non-empty, subsequent pages use ReadRecordsAfter with the
+	// When non-empty, subsequent pages use ReadRecordsWindow with the
 	// composite (time_updated, id) cursor to avoid dropping records that
 	// share a timestamp with the last record of the previous page.
 	var effectiveLastID string
@@ -612,14 +616,14 @@ func (c *Collector) sendRecords(
 	reqTodos := dedupTodoSnapshots(todos)
 
 	req := &gateway.IngestRequest{
-		SchemaVersion:     gateway.SchemaVersion,
-		CollectorVersion:  c.version,
-		SourceDatabaseID:  db.id,
-		Records:           ingestRecords,
-		SessionContexts:   reqSessionCtxs,
-		Projects:          reqProjects,
+		SchemaVersion:      gateway.SchemaVersion,
+		CollectorVersion:   c.version,
+		SourceDatabaseID:   db.id,
+		Records:            ingestRecords,
+		SessionContexts:    reqSessionCtxs,
+		Projects:           reqProjects,
 		ProjectDirectories: reqProjectDirs,
-		SessionTodos:      reqTodos,
+		SessionTodos:       reqTodos,
 	}
 
 	resp, err := c.transport.SendBatch(ctx, req)

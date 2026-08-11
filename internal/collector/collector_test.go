@@ -82,13 +82,13 @@ func testConfig(baseURL string) *config.Config {
 
 // mockReader implements sqlite.Reader for testing.
 type mockReader struct {
-	records         []sqlite.UsageRecord
-	err             error
-	sessionCtxs     []sqlite.SessionContextData
-	projects        []sqlite.ProjectData
-	projectDirs     []sqlite.ProjectDirectoryData
-	todos           []sqlite.TodoData
-	dbInfo          sqlite.DatabaseInfo
+	records     []sqlite.UsageRecord
+	err         error
+	sessionCtxs []sqlite.SessionContextData
+	projects    []sqlite.ProjectData
+	projectDirs []sqlite.ProjectDirectoryData
+	todos       []sqlite.TodoData
+	dbInfo      sqlite.DatabaseInfo
 }
 
 func (m *mockReader) ReadRecords(since time.Time, limit int) ([]sqlite.UsageRecord, error) {
@@ -291,14 +291,14 @@ func TestCollector_ResolveDatabases_SkipsExcludedDB(t *testing.T) {
 	dbPath := createTestDB(t, dir, "valid")
 
 	cfg := config.Config{
-		Token:             "tok",
-		BaseURL:           "http://localhost",
-		SQLitePath:        dbPath,
-		LogLevel:          "debug",
-		CursorDir:         dir,
-		PollInterval:      60 * time.Second,
-		HeartbeatInterval: 120 * time.Second,
-		BatchLimit:        100,
+		Token:                  "tok",
+		BaseURL:                "http://localhost",
+		SQLitePath:             dbPath,
+		LogLevel:               "debug",
+		CursorDir:              dir,
+		PollInterval:           60 * time.Second,
+		HeartbeatInterval:      120 * time.Second,
+		BatchLimit:             100,
 		ExcludeRecheckInterval: 1 * time.Hour, // recheck not due during test
 	}
 
@@ -326,14 +326,14 @@ func TestCollector_ResolveDatabases_RecheckDueDBReinspected(t *testing.T) {
 	dbPath := createTestDB(t, dir, "valid")
 
 	cfg := config.Config{
-		Token:             "tok",
-		BaseURL:           "http://localhost",
-		SQLitePath:        dbPath,
-		LogLevel:          "debug",
-		CursorDir:         dir,
-		PollInterval:      60 * time.Second,
-		HeartbeatInterval: 120 * time.Second,
-		BatchLimit:        100,
+		Token:                  "tok",
+		BaseURL:                "http://localhost",
+		SQLitePath:             dbPath,
+		LogLevel:               "debug",
+		CursorDir:              dir,
+		PollInterval:           60 * time.Second,
+		HeartbeatInterval:      120 * time.Second,
+		BatchLimit:             100,
 		ExcludeRecheckInterval: time.Nanosecond, // recheck due immediately
 	}
 
@@ -378,14 +378,14 @@ func TestCollector_ResolveDatabases_ExcludesOnFirstFailure(t *testing.T) {
 	}
 
 	cfg := config.Config{
-		Token:             "tok",
-		BaseURL:           "http://localhost",
-		SQLiteDir:         dir,
-		LogLevel:          "debug",
-		CursorDir:         dir,
-		PollInterval:      60 * time.Second,
-		HeartbeatInterval: 120 * time.Second,
-		BatchLimit:        100,
+		Token:                  "tok",
+		BaseURL:                "http://localhost",
+		SQLiteDir:              dir,
+		LogLevel:               "debug",
+		CursorDir:              dir,
+		PollInterval:           60 * time.Second,
+		HeartbeatInterval:      120 * time.Second,
+		BatchLimit:             100,
 		ExcludeRecheckInterval: 1 * time.Hour, // prevent immediate recheck
 	}
 
@@ -2748,7 +2748,7 @@ func TestCollector_ReplayRejectsUntilBeforeEffectiveSince(t *testing.T) {
 	cfg.SQLiteDir = dir
 	cfg.CursorDir = dir
 	cfg.Replay = true
-	cfg.ReplaySince = 2 * time.Second // => effective since = now - 2s
+	cfg.ReplaySince = 2 * time.Second                  // => effective since = now - 2s
 	cfg.ReplayUntil = time.Now().Add(-4 * time.Second) // before replaySince
 
 	_, err := NewCollector(cfg, "0.2.0")
@@ -2762,23 +2762,38 @@ func TestCollector_ReplayRejectsUntilBeforeEffectiveSince(t *testing.T) {
 
 // TestCollector_ReplayRejectsUntilEqualEffectiveSince verifies that
 // replay-until exactly equal to the effective replay-since is also rejected
-// (until must be strictly after since).
+// (until must be strictly after since). The clock is frozen so the test
+// exercises the true equality boundary rather than until < since.
 func TestCollector_ReplayRejectsUntilEqualEffectiveSince(t *testing.T) {
 	dir := t.TempDir()
 	createTestDB(t, dir, "test")
 
+	fixedNow := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
 	fixedSince := 2 * time.Second
-	// Compute a replayUntil that will equal the effective replaySince.
+
+	// Freeze the clock so the effective replay since is deterministic:
+	// NewCollector computes replaySince = now().Add(-cfg.ReplaySince).
+	oldNow := now
+	now = func() time.Time { return fixedNow }
+	t.Cleanup(func() { now = oldNow })
+
 	cfg := testConfig("http://localhost:9999")
 	cfg.SQLiteDir = dir
 	cfg.CursorDir = dir
 	cfg.Replay = true
 	cfg.ReplaySince = fixedSince
-	cfg.ReplayUntil = time.Now().Add(-fixedSince) // equal to effective since
+	// Exactly equal to the effective replay since — the boundary case
+	// until == since must be rejected (until must be strictly after).
+	cfg.ReplayUntil = fixedNow.Add(-fixedSince)
 
 	_, err := NewCollector(cfg, "0.2.0")
 	if err == nil {
 		t.Fatal("expected error when replay-until == effective since, got nil")
+	}
+	// Confirm the rejection comes from the until-after-since validation,
+	// not some unrelated startup failure.
+	if !strings.Contains(err.Error(), "must be after replay-since") {
+		t.Errorf("expected the until-after-since validation error, got: %v", err)
 	}
 }
 
@@ -2787,7 +2802,7 @@ func TestCollector_ReplayRejectsUntilEqualEffectiveSince(t *testing.T) {
 func TestCollector_ReplayAcceptsUntilAfterEffectiveSince(t *testing.T) {
 	cfg := testConfig("http://localhost:9999")
 	cfg.Replay = true
-	cfg.ReplaySince = 2 * time.Second // effective since = now - 2s
+	cfg.ReplaySince = 2 * time.Second                  // effective since = now - 2s
 	cfg.ReplayUntil = time.Now().Add(-1 * time.Second) // after effective since
 
 	c, err := NewCollector(cfg, "0.2.0")
@@ -2852,8 +2867,8 @@ func TestCollector_ReplayWithUntilBoundsRecordsExceedingly(t *testing.T) {
 	cfg.SQLitePath = dbPath
 	cfg.CursorDir = dir
 	cfg.Replay = true
-	cfg.ReplaySince = 0            // full history
-	cfg.ReplayUntil = refTime      // upper bound at refTime
+	cfg.ReplaySince = 0       // full history
+	cfg.ReplayUntil = refTime // upper bound at refTime
 
 	c, err := NewCollector(cfg, "0.2.0")
 	if err != nil {
@@ -3066,8 +3081,8 @@ func TestCollector_ReplayWithUntilEmptyWindowCompletesWithoutSends(t *testing.T)
 	cfg.SQLitePath = dbPath
 	cfg.CursorDir = dir
 	cfg.Replay = true
-	cfg.ReplaySince = 0                               // full history
-	cfg.ReplayUntil = refTime.Add(-1 * time.Hour)     // until is before all records
+	cfg.ReplaySince = 0                           // full history
+	cfg.ReplayUntil = refTime.Add(-1 * time.Hour) // until is before all records
 
 	c, err := NewCollector(cfg, "0.2.0")
 	if err != nil {

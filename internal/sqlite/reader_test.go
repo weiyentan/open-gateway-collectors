@@ -95,7 +95,7 @@ type sessionRow struct {
 }
 
 type messageRow struct {
-	id, sessionID, data string
+	id, sessionID, data      string
 	timeCreated, timeUpdated int64
 }
 
@@ -1524,5 +1524,3 @@ func TestReadRecordsWindow_TieSafePagingAtUntil(t *testing.T) {
 		t.Errorf("expected %d unique records, got %d", len(expectedIDs), len(collected))
 	}
 }
-
-

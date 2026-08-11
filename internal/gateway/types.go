@@ -97,15 +97,15 @@ type TodoSnapshot struct {
 
 // IngestRequest is the full payload sent in a POST /ingest request.
 type IngestRequest struct {
-	SchemaVersion     string                    `json:"schema_version"`
-	CollectorVersion  string                    `json:"collector_version"`
-	ClientHostname    string                    `json:"client_hostname"`
-	SourceDatabaseID  string                    `json:"source_database_id"`
-	Records           []IngestRecord            `json:"records"`
-	SessionContexts   []SessionContext           `json:"session_contexts,omitempty"`
-	Projects          []ProjectSnapshot          `json:"projects,omitempty"`
+	SchemaVersion      string                     `json:"schema_version"`
+	CollectorVersion   string                     `json:"collector_version"`
+	ClientHostname     string                     `json:"client_hostname"`
+	SourceDatabaseID   string                     `json:"source_database_id"`
+	Records            []IngestRecord             `json:"records"`
+	SessionContexts    []SessionContext           `json:"session_contexts,omitempty"`
+	Projects           []ProjectSnapshot          `json:"projects,omitempty"`
 	ProjectDirectories []ProjectDirectorySnapshot `json:"project_directories,omitempty"`
-	SessionTodos      []TodoSnapshot             `json:"session_todos,omitempty"`
+	SessionTodos       []TodoSnapshot             `json:"session_todos,omitempty"`
 }
 
 // BatchResult describes the outcome for a single record in an ingest batch.
@@ -117,10 +117,10 @@ type BatchResult struct {
 
 // IngestResponse is the Gateway's response to a POST /ingest request.
 type IngestResponse struct {
-	BatchID        string        `json:"batch_id"`
-	AcceptedCount  int           `json:"accepted_count"`
-	RejectedCount  int           `json:"rejected_count"`
-	Results        []BatchResult `json:"results"`
+	BatchID       string        `json:"batch_id"`
+	AcceptedCount int           `json:"accepted_count"`
+	RejectedCount int           `json:"rejected_count"`
+	Results       []BatchResult `json:"results"`
 }
 
 // ---------------------------------------------------------------------------

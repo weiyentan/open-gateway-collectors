@@ -68,12 +68,12 @@ type Reader interface {
 // It uses a read-only connection with a prepared statement for efficient
 // cursor-based incremental reads.
 type OpenCodeReader struct {
-	db            *sql.DB
-	stmt          *sql.Stmt
-	stmtAfter     *sql.Stmt
-	stmtWindow    *sql.Stmt
+	db              *sql.DB
+	stmt            *sql.Stmt
+	stmtAfter       *sql.Stmt
+	stmtWindow      *sql.Stmt
 	stmtWindowAfter *sql.Stmt
-	dbInfo        *DatabaseInfo
+	dbInfo          *DatabaseInfo
 }
 
 // NewOpenCodeReader opens an OpenCode SQLite database in read-only mode,
@@ -263,10 +263,10 @@ func scanRecords(rows *sql.Rows) ([]UsageRecord, error) {
 	var records []UsageRecord
 	for rows.Next() {
 		var (
-			msgID, sessionID     string
-			msgCreated, msgUpdated int64
-			dataJSON               string
-			sessCreated, sessUpdated int64
+			msgID, sessionID                        string
+			msgCreated, msgUpdated                  int64
+			dataJSON                                string
+			sessCreated, sessUpdated                int64
 			projectID, parentID, workspaceID, agent sql.NullString
 		)
 
@@ -569,14 +569,14 @@ type messageData struct {
 	Finish     string  `json:"finish"`
 	Mode       string  `json:"mode"`
 	Tokens     struct {
-		Input      int64 `json:"input"`
-		Output     int64 `json:"output"`
-		Reasoning  int64 `json:"reasoning"`
-		Cache      struct {
+		Input     int64 `json:"input"`
+		Output    int64 `json:"output"`
+		Reasoning int64 `json:"reasoning"`
+		Cache     struct {
 			Read  int64 `json:"read"`
 			Write int64 `json:"write"`
 		} `json:"cache"`
-		Total      int64 `json:"total"`
+		Total int64 `json:"total"`
 	} `json:"tokens"`
 }
 

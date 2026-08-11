@@ -56,7 +56,7 @@
 - A **Usage Record** is sent in an **Ingest Batch** to the **Gateway**.
 - An **Ingest Batch** is identified by a **Batch ID** (UUID) returned by the Gateway.
 - The **Idempotency Key** spans **Collector** (via client identity) → **Source Database** → **Usage Record**.
-- A **Replay** window is bounded by the **Cursor** or an explicit **since** time (strict lower bound) and an optional **until** timestamp (inclusive upper bound); the **Cursor** advances only after **Replay** completes.
+- A **Replay** window is bounded by an explicit **since** time (strict lower bound, never the stored **Cursor** — the stored **Cursor** is only a clamp so the final **Cursor** never regresses) and an optional **until** timestamp (inclusive upper bound); the **Cursor** advances only after **Replay** completes.
 
 ## Example dialogue
 
