@@ -98,7 +98,7 @@ Each push cycle (one `iterate()` call) runs every **Poll Interval** (default: 60
     - **Project Directory Snapshots** — Directory mappings from the optional `project_directory` table.
     - **Todo Snapshots** — Todo items (description, status) from the optional `todo` table.
     
-    Missing or absent tables are handled gracefully — the reader returns empty slices without error. Projections are de-duplicated by ID within the batch before inclusion in the ingest payload.
+    Missing or absent tables are handled gracefully — the reader returns empty slices without error. Projections are de-duplicated by ID within the batch before inclusion in the ingest payload. **Project Directory Snapshot** entries with blank or whitespace-only paths (including NULL `project_directory.path` rows, which surface as empty strings) are filtered out client-side at this point — the Gateway rejects an empty `directory` value with HTTP 422, which would fail the entire batch.
 
 ### Phase 3: Ingestion
 
@@ -128,7 +128,7 @@ To backfill those records after deployment, run a collector **Replay** (see ADR-
 
 ## ADR References
 
-The collector's design is grounded in five architectural decisions. Each ADR contributes to the workflow as described below.
+The collector's design is grounded in eight architectural decisions. Each ADR contributes to the workflow as described below.
 
 ### ADR-0001: Use Go for Collector
 
@@ -170,6 +170,24 @@ Multiple collectors may share the same `client_id` if deployed from the same con
 
 > **Workflow impact:** The hostname is injected into every `IngestRequest` by the Gateway client's `SendBatch` method. It is resolved once in `NewCollector` and reused for the lifetime of the process. If hostname resolution fails at startup, the collector exits with an error — it will not run without identifying itself.
 
+### ADR-0006: Kafka as Primary Transport
+
+Ingest Batches are produced to a Kafka `opencode-usage` topic (keyed by Source Database ID for per-database ordering) instead of being POSTed directly; a separate Python Consumer in the Gateway namespace reads Kafka and forwards each batch to the Gateway's `/ingest` endpoint. This decouples collector progress from Gateway availability: the collector advances its Cursor on Kafka produce acknowledgement rather than waiting for Gateway processing.
+
+> **Workflow impact:** When the Gateway rejects a batch (e.g., HTTP 422), the message is moved to the Gateway consumer's dead-letter queue (DLQ) — the records are never stored, and the collector's Cursor has already advanced past them because the produce succeeded. See [Operational Notes](#replay-after-client-side-filtering-fixes) for the backfill path.
+
+### ADR-0007: Gateway-Authoritative Cursor
+
+The Gateway's `GET /cursor` endpoint (keyed by Source Database ID) is the authoritative Cursor source: the collector queries it at startup to determine its starting position, keeping the local `.collector-state` cache as a fallback when the Gateway is unreachable. This closes the crash-between-ack-and-persist gap where a batch was accepted by the Gateway but the local Cursor never advanced.
+
+> **Workflow impact:** The Cursor is still persisted per-batch after each successful send, but the Gateway's `last_seen_at` becomes the source of truth on startup, preventing redundant re-delivery after crashes.
+
+### ADR-0008: Replay Through the Pipeline
+
+Replay is an explicit, one-shot collector mode that re-reads Source Database history past the Cursor and re-sends records and projections through the normal ingest pipeline, instead of a Gateway-side SQL backfill. The Gateway's idempotent upserts make re-sending safe. Replay runs within a bounded window (`since` strict lower bound, optional `until` inclusive upper bound) and requires an explicit trigger (`-replay` or `GATEWAY_COLLECTOR_REPLAY=true`); the Cursor advances only after Replay completes, clamped so it never regresses.
+
+> **Workflow impact:** Replay is the recovery path for batches that were never stored — e.g., a batch the Gateway rejected with HTTP 422 (such as an empty Project Directory Snapshot `directory` value) that was moved to the consumer DLQ before a collector-side fix was deployed. Deploy the fix first, then run Replay to backfill the window; incremental reads do not re-send DLQ'd batches. See [Operational Notes](#replay-after-client-side-filtering-fixes).
+
 ## Domain Language
 
 This document uses the following terms consistently, as defined in [CONTEXT.md](../CONTEXT.md):
@@ -182,7 +200,7 @@ This document uses the following terms consistently, as defined in [CONTEXT.md](
 | **Usage Record** | A single normalized record derived from one assistant `message.data` usage JSON blob. |
 | **Session Context** | Descriptive metadata read from an OpenCode `session` row (title, agent, project ID, etc.) sent as a batch-level snapshot. |
 | **Project Snapshot** | A read-only snapshot of OpenCode project metadata (title, worktree path) read from the `project` table. |
-| **Project Directory Snapshot** | A read-only mapping from a project to a directory path from the `project_directory` table. |
+| **Project Directory Snapshot** | A read-only mapping from a project to a directory path from the `project_directory` table. Blank or whitespace-only paths are filtered out client-side before the ingest batch is built. |
 | **Todo Snapshot** | The latest observed set of OpenCode `todo` rows for a session sent as a batch-level snapshot. |
 | **Ingest Batch** | A set of Usage Records and projection snapshots POSTed to the Gateway's `/ingest` endpoint in a single HTTP request. |
 | **Heartbeat** | An empty Ingest Batch signaling the collector is alive. |

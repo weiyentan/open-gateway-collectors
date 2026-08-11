@@ -18,7 +18,7 @@
 
 **Project Snapshot** — A read-only snapshot of OpenCode project metadata (title, worktree path) read from the `project` table in a Source Database. Forwarded alongside usage records in the ingest batch for Gateway agent-run reporting. *Avoid: "project context", "project enrichment"*
 
-**Project Directory Snapshot** — A read-only mapping from a project to a directory path, read from the optional `project_directory` table. Forwarded alongside usage records in the ingest batch. *Avoid: "project directory context"*
+**Project Directory Snapshot** — A read-only mapping from a project to a directory path, read from the optional `project_directory` table. Forwarded alongside usage records in the ingest batch. Blank or whitespace-only paths — including NULL `project_directory.path` rows that surface as empty strings — are filtered out client-side before the ingest batch is built, so the Gateway never receives an empty `directory` value (which it rejects with HTTP 422). The Source Database is never modified. *Avoid: "project directory context"*
 
 **Todo Snapshot** — The latest observed set of OpenCode `todo` rows for a Session in a Source Database. It is read-only telemetry forwarded to the Gateway for agent run reporting. *Avoid: "todo events", "task timeline"*
 
