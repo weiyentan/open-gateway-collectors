@@ -1383,6 +1383,73 @@ func TestCollector_DedupProjectDirectoriesWithinBatch(t *testing.T) {
 	}
 }
 
+func TestCollector_FiltersBlankProjectDirectoryPaths(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	srv, lastReq := gatewayServer(http.StatusCreated, gateway.IngestResponse{
+		BatchID:       "batch-blank-dir-001",
+		AcceptedCount: 2,
+	})
+
+	cfg := testConfig(srv.URL)
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+
+	c, err := NewCollector(cfg, "0.1.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2"}, now),
+		// NULL/empty paths from SQLite surface as empty strings; blank and
+		// whitespace-only paths must be omitted from the outgoing request.
+		projectDirs: []sqlite.ProjectDirectoryData{
+			{ExternalProjectID: "proj-1", Path: ""},
+			{ExternalProjectID: "proj-1", Path: "   "},
+			{ExternalProjectID: "proj-1", Path: "\t\n"},
+			{ExternalProjectID: "proj-1", Path: "/tmp/test/src"},
+			{ExternalProjectID: "proj-1", Path: "/tmp/test/src"},
+		},
+		sessionCtxs: []sqlite.SessionContextData{
+			{ExternalSessionID: "sess-rec-1", ProjectID: "proj-1"},
+			{ExternalSessionID: "sess-rec-2", ProjectID: "proj-1"},
+		},
+	}
+
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, _ := c.resolveDatabases()
+	c.processDatabase(context.Background(), dbs[0])
+
+	req, ok := lastReq.Load().(gateway.IngestRequest)
+	if !ok {
+		t.Fatal("no request received")
+	}
+
+	// Usage records must still be sent even though blank directory mappings
+	// were present in the batch.
+	if len(req.Records) != 2 {
+		t.Fatalf("expected 2 usage records to be sent, got %d", len(req.Records))
+	}
+
+	// Only the non-blank path survives, deduplicated to a single snapshot.
+	if len(req.ProjectDirectories) != 1 {
+		t.Fatalf("expected 1 project directory snapshot after filtering blanks, got %d", len(req.ProjectDirectories))
+	}
+	pd := req.ProjectDirectories[0]
+	if pd.ExternalProjectID != "proj-1" {
+		t.Errorf("project directory external_project_id = %q, want %q", pd.ExternalProjectID, "proj-1")
+	}
+	if pd.Directory != "/tmp/test/src" {
+		t.Errorf("project directory path = %q, want %q", pd.Directory, "/tmp/test/src")
+	}
+}
+
 func TestCollector_CursorUnchangedWithProjections(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := createTestDB(t, dir, "test")

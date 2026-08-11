@@ -59,7 +59,7 @@ type Config struct {
 	ExcludeRecheckInterval time.Duration `env:"GATEWAY_COLLECTOR_EXCLUDE_RECHECK_INTERVAL"`
 
 	// Transport selects the transport mechanism for sending ingest batches.
-	// Valid values: "http", "kafka". Default: "kafka".
+	// Valid values: "http", "kafka". Default: "http".
 	Transport string `env:"GATEWAY_COLLECTOR_TRANSPORT"`
 
 	// KafkaBrokers is a comma-separated list of Kafka bootstrap brokers.
