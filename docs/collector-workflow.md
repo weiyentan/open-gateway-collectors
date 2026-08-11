@@ -122,9 +122,12 @@ Each push cycle (one `iterate()` call) runs every **Poll Interval** (default: 60
 
 ### Replay after client-side filtering fixes
 
-Client-side filters — such as omitting blank or whitespace-only **Project Directory Snapshot** paths so the Gateway no longer rejects an entire batch with HTTP 422 — apply only to batches sent **after** the fixed collector version is deployed. Batches that were already rejected (HTTP 422) and moved to the dead-letter queue (DLQ) by the Gateway consumer were never stored, and the collector's Cursor has already advanced past them, so they will not be re-sent by normal incremental reads.
+Client-side filters — such as omitting blank or whitespace-only **Project Directory Snapshot** paths so the Gateway no longer rejects an entire batch with HTTP 422 — apply only to batches sent **after** the fixed collector version is deployed. The recovery path for previously rejected batches differs by transport:
 
-To backfill those records after deployment, run a collector **Replay** (see ADR-0008): start with `-replay` or `GATEWAY_COLLECTOR_REPLAY=true`, optionally bounded with `GATEWAY_COLLECTOR_REPLAY_SINCE` / `GATEWAY_COLLECTOR_REPLAY_UNTIL`. Replay re-reads Source Database history past the Cursor and re-sends records and projections through the normal ingest pipeline; the Gateway's idempotent upserts make re-sending safe.
+- **Kafka transport** (`GATEWAY_COLLECTOR_TRANSPORT=kafka`): The batch is produced to Kafka before the Gateway validates it, so a 422-rejected batch moves the message to the consumer DLQ. The collector's Cursor has already advanced past it because the produce acknowledgement succeeded, so the records will not be re-sent by normal incremental reads. Run a collector **Replay** (see ADR-0008) to backfill them.
+- **HTTP transport** (default, `GATEWAY_COLLECTOR_TRANSPORT=http`): A 422 is non-retryable, the collector does NOT advance the Cursor on error, and the batch will be re-sent by normal incremental reads on the next cycle. No DLQ exists, and Replay is not needed.
+
+To backfill records after deployment, run a collector **Replay** (see ADR-0008): start with `-replay` or `GATEWAY_COLLECTOR_REPLAY=true`, optionally bounded with `GATEWAY_COLLECTOR_REPLAY_SINCE` / `GATEWAY_COLLECTOR_REPLAY_UNTIL`. Replay re-reads Source Database history past the Cursor and re-sends records and projections through the normal ingest pipeline; the Gateway's idempotent upserts make re-sending safe.
 
 ## ADR References
 
@@ -172,21 +175,21 @@ Multiple collectors may share the same `client_id` if deployed from the same con
 
 ### ADR-0006: Kafka as Primary Transport
 
-Ingest Batches are produced to a Kafka `opencode-usage` topic (keyed by Source Database ID for per-database ordering) instead of being POSTed directly; a separate Python Consumer in the Gateway namespace reads Kafka and forwards each batch to the Gateway's `/ingest` endpoint. This decouples collector progress from Gateway availability: the collector advances its Cursor on Kafka produce acknowledgement rather than waiting for Gateway processing.
+When `GATEWAY_COLLECTOR_TRANSPORT=kafka`, Ingest Batches are produced to a Kafka `opencode-usage` topic (keyed by Source Database ID for per-database ordering) instead of being POSTed directly; a separate Python Consumer in the Gateway namespace reads Kafka and forwards each batch to the Gateway's `/ingest` endpoint. The default transport remains `http`, in which case batches are POSTed directly (see Phase 3). This decouples collector progress from Gateway availability: the collector advances its Cursor on Kafka produce acknowledgement rather than waiting for Gateway processing.
 
-> **Workflow impact:** When the Gateway rejects a batch (e.g., HTTP 422), the message is moved to the Gateway consumer's dead-letter queue (DLQ) — the records are never stored, and the collector's Cursor has already advanced past them because the produce succeeded. See [Operational Notes](#replay-after-client-side-filtering-fixes) for the backfill path.
+> **Workflow impact:** This is the Kafka-transport behavior only. Under `kafka`, the batch is produced before the Gateway validates it, so the Cursor advances on produce acknowledgement. When the Gateway later rejects the batch (e.g., HTTP 422), the message is moved to the Gateway consumer's dead-letter queue (DLQ) — the records are never stored, and the collector's Cursor has already advanced past them, so incremental reads will not re-send them. Under the default `http` transport, a 422 is non-retryable, the Cursor is not advanced, and the batch is re-sent by normal incremental reads (no DLQ). See [Operational Notes](#replay-after-client-side-filtering-fixes) for the backfill path.
 
 ### ADR-0007: Gateway-Authoritative Cursor
 
-The Gateway's `GET /cursor` endpoint (keyed by Source Database ID) is the authoritative Cursor source: the collector queries it at startup to determine its starting position, keeping the local `.collector-state` cache as a fallback when the Gateway is unreachable. This closes the crash-between-ack-and-persist gap where a batch was accepted by the Gateway but the local Cursor never advanced.
+ADR-0007 (accepted; collector-side wiring pending): the Gateway's `GET /cursor` endpoint is intended to become the authoritative Cursor source, with the local `.collector-state` cache as a fallback when the Gateway is unreachable. This is not yet implemented — no `GET /cursor` client exists in the collector today; cursor reads currently go through the local `state.Tracker` only.
 
-> **Workflow impact:** The Cursor is still persisted per-batch after each successful send, but the Gateway's `last_seen_at` becomes the source of truth on startup, preventing redundant re-delivery after crashes.
+> **Workflow impact:** Today the local tracker is the only cursor source. ADR-0007 wiring is pending — when implemented, the Gateway's `last_seen_at` will become the source of truth on startup, preventing redundant re-delivery after crashes.
 
 ### ADR-0008: Replay Through the Pipeline
 
 Replay is an explicit, one-shot collector mode that re-reads Source Database history past the Cursor and re-sends records and projections through the normal ingest pipeline, instead of a Gateway-side SQL backfill. The Gateway's idempotent upserts make re-sending safe. Replay runs within a bounded window (`since` strict lower bound, optional `until` inclusive upper bound) and requires an explicit trigger (`-replay` or `GATEWAY_COLLECTOR_REPLAY=true`); the Cursor advances only after Replay completes, clamped so it never regresses.
 
-> **Workflow impact:** Replay is the recovery path for batches that were never stored — e.g., a batch the Gateway rejected with HTTP 422 (such as an empty Project Directory Snapshot `directory` value) that was moved to the consumer DLQ before a collector-side fix was deployed. Deploy the fix first, then run Replay to backfill the window; incremental reads do not re-send DLQ'd batches. See [Operational Notes](#replay-after-client-side-filtering-fixes).
+> **Workflow impact:** Under the Kafka transport (`GATEWAY_COLLECTOR_TRANSPORT=kafka`), Replay is the recovery path for batches that were never stored — e.g., a batch the Gateway rejected with HTTP 422 (such as an empty Project Directory Snapshot `directory` value) that was moved to the consumer DLQ before a collector-side fix was deployed. Deploy the fix first, then run Replay to backfill the window; incremental reads do not re-send DLQ'd batches. Under the default `http` transport, a 422 is non-retryable, the Cursor is not advanced, and the batch is re-sent by normal incremental reads — no Replay is needed. See [Operational Notes](#replay-after-client-side-filtering-fixes).
 
 ## Domain Language
 
