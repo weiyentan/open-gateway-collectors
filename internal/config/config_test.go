@@ -247,6 +247,135 @@ func TestLoadReplaySinceDuration(t *testing.T) {
 	}
 }
 
+func TestLoadReplayUntil(t *testing.T) {
+	saved := saveEnv()
+	defer restoreEnv(saved)
+	clearEnv()
+
+	t.Setenv("GATEWAY_COLLECTOR_TRANSPORT", "http")
+	t.Setenv("GATEWAY_COLLECTOR_TOKEN", "test-token")
+	t.Setenv("GATEWAY_BASE_URL", "http://localhost:8080")
+	t.Setenv("GATEWAY_COLLECTOR_REPLAY", "true")
+	t.Setenv("GATEWAY_COLLECTOR_REPLAY_UNTIL", "2026-01-02T15:04:05Z")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() returned unexpected error: %v", err)
+	}
+	want := time.Date(2026, 1, 2, 15, 4, 5, 0, time.UTC)
+	if !cfg.ReplayUntil.Equal(want) {
+		t.Errorf("ReplayUntil = %v, want %v", cfg.ReplayUntil, want)
+	}
+}
+
+func TestLoadReplayUntilNano(t *testing.T) {
+	saved := saveEnv()
+	defer restoreEnv(saved)
+	clearEnv()
+
+	t.Setenv("GATEWAY_COLLECTOR_TRANSPORT", "http")
+	t.Setenv("GATEWAY_COLLECTOR_TOKEN", "test-token")
+	t.Setenv("GATEWAY_BASE_URL", "http://localhost:8080")
+	t.Setenv("GATEWAY_COLLECTOR_REPLAY", "true")
+	t.Setenv("GATEWAY_COLLECTOR_REPLAY_UNTIL", "2026-01-02T15:04:05.123456789Z")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() returned unexpected error: %v", err)
+	}
+	want := time.Date(2026, 1, 2, 15, 4, 5, 123456789, time.UTC)
+	if !cfg.ReplayUntil.Equal(want) {
+		t.Errorf("ReplayUntil = %v, want %v", cfg.ReplayUntil, want)
+	}
+}
+
+func TestLoadReplayUntilUnset(t *testing.T) {
+	saved := saveEnv()
+	defer restoreEnv(saved)
+	clearEnv()
+
+	t.Setenv("GATEWAY_COLLECTOR_TRANSPORT", "http")
+	t.Setenv("GATEWAY_COLLECTOR_TOKEN", "test-token")
+	t.Setenv("GATEWAY_BASE_URL", "http://localhost:8080")
+	t.Setenv("GATEWAY_COLLECTOR_REPLAY", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() returned unexpected error: %v", err)
+	}
+	if !cfg.ReplayUntil.IsZero() {
+		t.Errorf("ReplayUntil = %v, want zero (no upper bound)", cfg.ReplayUntil)
+	}
+}
+
+func TestLoadReplayUntilInvalid(t *testing.T) {
+	saved := saveEnv()
+	defer restoreEnv(saved)
+	clearEnv()
+
+	t.Setenv("GATEWAY_COLLECTOR_TRANSPORT", "http")
+	t.Setenv("GATEWAY_COLLECTOR_TOKEN", "test-token")
+	t.Setenv("GATEWAY_BASE_URL", "http://localhost:8080")
+	t.Setenv("GATEWAY_COLLECTOR_REPLAY_UNTIL", "not-a-timestamp")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() expected error for invalid REPLAY_UNTIL, got nil")
+	}
+	if !strings.Contains(err.Error(), "GATEWAY_COLLECTOR_REPLAY_UNTIL") {
+		t.Errorf("Load() error = %v, want it to name GATEWAY_COLLECTOR_REPLAY_UNTIL", err)
+	}
+}
+
+func TestLoadReplayUntilDoesNotEnableReplay(t *testing.T) {
+	saved := saveEnv()
+	defer restoreEnv(saved)
+	clearEnv()
+
+	t.Setenv("GATEWAY_COLLECTOR_TRANSPORT", "http")
+	t.Setenv("GATEWAY_COLLECTOR_TOKEN", "test-token")
+	t.Setenv("GATEWAY_BASE_URL", "http://localhost:8080")
+	t.Setenv("GATEWAY_COLLECTOR_REPLAY_UNTIL", "2026-01-02T15:04:05Z")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() returned unexpected error: %v", err)
+	}
+	if cfg.Replay {
+		t.Error("Replay = true, want false — REPLAY_UNTIL alone must not enable replay")
+	}
+}
+
+func TestParseReplayUntil(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    time.Time
+		wantErr bool
+	}{
+		{"RFC3339", "2026-01-02T15:04:05Z", time.Date(2026, 1, 2, 15, 4, 5, 0, time.UTC), false},
+		{"RFC3339 with offset", "2026-01-02T15:04:05+02:00", time.Date(2026, 1, 2, 15, 4, 5, 0, time.FixedZone("", 2*60*60)), false},
+		{"RFC3339 with fractional seconds", "2026-01-02T15:04:05.123456789Z", time.Date(2026, 1, 2, 15, 4, 5, 123456789, time.UTC), false},
+		{"empty is rejected", "", time.Time{}, true},
+		{"date only is rejected", "2026-01-02", time.Time{}, true},
+		{"missing timezone is rejected", "2026-01-02T15:04:05", time.Time{}, true},
+		{"space separator is rejected", "2026-01-02 15:04:05Z", time.Time{}, true},
+		{"garbage is rejected", "not-a-timestamp", time.Time{}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseReplayUntil(tt.value)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParseReplayUntil(%q) error = %v, wantErr = %v", tt.value, err, tt.wantErr)
+			}
+			if !tt.wantErr && !got.Equal(tt.want) {
+				t.Errorf("ParseReplayUntil(%q) = %v, want %v", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadReplayDisabledByDefault(t *testing.T) {
 	saved := saveEnv()
 	defer restoreEnv(saved)
@@ -333,6 +462,7 @@ func saveEnv() map[string]string {
 		"GATEWAY_KAFKA_CLIENT_ID",
 		"GATEWAY_COLLECTOR_REPLAY",
 		"GATEWAY_COLLECTOR_REPLAY_SINCE",
+		"GATEWAY_COLLECTOR_REPLAY_UNTIL",
 	}
 	saved := make(map[string]string, len(keys))
 	for _, k := range keys {
@@ -370,6 +500,7 @@ func clearEnv() {
 		"GATEWAY_KAFKA_CLIENT_ID",
 		"GATEWAY_COLLECTOR_REPLAY",
 		"GATEWAY_COLLECTOR_REPLAY_SINCE",
+		"GATEWAY_COLLECTOR_REPLAY_UNTIL",
 	}
 	for _, k := range keys {
 		os.Unsetenv(k)
