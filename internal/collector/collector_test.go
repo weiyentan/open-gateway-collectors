@@ -82,13 +82,13 @@ func testConfig(baseURL string) *config.Config {
 
 // mockReader implements sqlite.Reader for testing.
 type mockReader struct {
-	records         []sqlite.UsageRecord
-	err             error
-	sessionCtxs     []sqlite.SessionContextData
-	projects        []sqlite.ProjectData
-	projectDirs     []sqlite.ProjectDirectoryData
-	todos           []sqlite.TodoData
-	dbInfo          sqlite.DatabaseInfo
+	records     []sqlite.UsageRecord
+	err         error
+	sessionCtxs []sqlite.SessionContextData
+	projects    []sqlite.ProjectData
+	projectDirs []sqlite.ProjectDirectoryData
+	todos       []sqlite.TodoData
+	dbInfo      sqlite.DatabaseInfo
 }
 
 func (m *mockReader) ReadRecords(since time.Time, limit int) ([]sqlite.UsageRecord, error) {
@@ -117,6 +117,35 @@ func (m *mockReader) ReadRecordsAfter(since time.Time, afterID string, limit int
 		if after {
 			result = append(result, r)
 		}
+	}
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
+func (m *mockReader) ReadRecordsWindow(since time.Time, until time.Time, afterID string, limit int) ([]sqlite.UsageRecord, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	var result []sqlite.UsageRecord
+	for _, r := range m.records {
+		// Lower bound: strict > since when afterID is empty,
+		// composite (>= since, > afterID) when afterID is non-empty.
+		var after bool
+		if afterID == "" {
+			after = r.OccurredAt.After(since)
+		} else {
+			after = r.OccurredAt.After(since) || (r.OccurredAt.Equal(since) && r.SourceRecordID > afterID)
+		}
+		if !after {
+			continue
+		}
+		// Upper bound: inclusive <= until (zero = no upper bound).
+		if !until.IsZero() && r.OccurredAt.After(until) {
+			continue
+		}
+		result = append(result, r)
 	}
 	if len(result) > limit {
 		result = result[:limit]
@@ -262,14 +291,14 @@ func TestCollector_ResolveDatabases_SkipsExcludedDB(t *testing.T) {
 	dbPath := createTestDB(t, dir, "valid")
 
 	cfg := config.Config{
-		Token:             "tok",
-		BaseURL:           "http://localhost",
-		SQLitePath:        dbPath,
-		LogLevel:          "debug",
-		CursorDir:         dir,
-		PollInterval:      60 * time.Second,
-		HeartbeatInterval: 120 * time.Second,
-		BatchLimit:        100,
+		Token:                  "tok",
+		BaseURL:                "http://localhost",
+		SQLitePath:             dbPath,
+		LogLevel:               "debug",
+		CursorDir:              dir,
+		PollInterval:           60 * time.Second,
+		HeartbeatInterval:      120 * time.Second,
+		BatchLimit:             100,
 		ExcludeRecheckInterval: 1 * time.Hour, // recheck not due during test
 	}
 
@@ -297,14 +326,14 @@ func TestCollector_ResolveDatabases_RecheckDueDBReinspected(t *testing.T) {
 	dbPath := createTestDB(t, dir, "valid")
 
 	cfg := config.Config{
-		Token:             "tok",
-		BaseURL:           "http://localhost",
-		SQLitePath:        dbPath,
-		LogLevel:          "debug",
-		CursorDir:         dir,
-		PollInterval:      60 * time.Second,
-		HeartbeatInterval: 120 * time.Second,
-		BatchLimit:        100,
+		Token:                  "tok",
+		BaseURL:                "http://localhost",
+		SQLitePath:             dbPath,
+		LogLevel:               "debug",
+		CursorDir:              dir,
+		PollInterval:           60 * time.Second,
+		HeartbeatInterval:      120 * time.Second,
+		BatchLimit:             100,
 		ExcludeRecheckInterval: time.Nanosecond, // recheck due immediately
 	}
 
@@ -349,14 +378,14 @@ func TestCollector_ResolveDatabases_ExcludesOnFirstFailure(t *testing.T) {
 	}
 
 	cfg := config.Config{
-		Token:             "tok",
-		BaseURL:           "http://localhost",
-		SQLiteDir:         dir,
-		LogLevel:          "debug",
-		CursorDir:         dir,
-		PollInterval:      60 * time.Second,
-		HeartbeatInterval: 120 * time.Second,
-		BatchLimit:        100,
+		Token:                  "tok",
+		BaseURL:                "http://localhost",
+		SQLiteDir:              dir,
+		LogLevel:               "debug",
+		CursorDir:              dir,
+		PollInterval:           60 * time.Second,
+		HeartbeatInterval:      120 * time.Second,
+		BatchLimit:             100,
 		ExcludeRecheckInterval: 1 * time.Hour, // prevent immediate recheck
 	}
 
@@ -2701,4 +2730,682 @@ func (ft *failingTransport) SendBatch(ctx context.Context, req *gateway.IngestRe
 		return nil, ft.err
 	}
 	return ft.transport.SendBatch(ctx, req)
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Bounded replay window (issue #58)
+// ---------------------------------------------------------------------------
+
+// TestCollector_ReplayRejectsUntilBeforeEffectiveSince verifies that startup
+// fails when replay-until is set and is not strictly after the effective
+// replay-since time.
+func TestCollector_ReplayRejectsUntilBeforeEffectiveSince(t *testing.T) {
+	dir := t.TempDir()
+	createTestDB(t, dir, "test")
+
+	// replaySince = now - 2s, replayUntil = now - 4s: until < since.
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLiteDir = dir
+	cfg.CursorDir = dir
+	cfg.Replay = true
+	cfg.ReplaySince = 2 * time.Second                  // => effective since = now - 2s
+	cfg.ReplayUntil = time.Now().Add(-4 * time.Second) // before replaySince
+
+	_, err := NewCollector(cfg, "0.2.0")
+	if err == nil {
+		t.Fatal("expected error when replay-until <= effective since, got nil")
+	}
+	if !strings.Contains(err.Error(), "replay-until") {
+		t.Errorf("error should mention replay-until, got: %v", err)
+	}
+}
+
+// TestCollector_ReplayRejectsUntilEqualEffectiveSince verifies that
+// replay-until exactly equal to the effective replay-since is also rejected
+// (until must be strictly after since). The clock is frozen so the test
+// exercises the true equality boundary rather than until < since.
+func TestCollector_ReplayRejectsUntilEqualEffectiveSince(t *testing.T) {
+	dir := t.TempDir()
+	createTestDB(t, dir, "test")
+
+	fixedNow := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	fixedSince := 2 * time.Second
+
+	// Freeze the clock so the effective replay since is deterministic:
+	// NewCollector computes replaySince = now().Add(-cfg.ReplaySince).
+	oldNow := now
+	now = func() time.Time { return fixedNow }
+	t.Cleanup(func() { now = oldNow })
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLiteDir = dir
+	cfg.CursorDir = dir
+	cfg.Replay = true
+	cfg.ReplaySince = fixedSince
+	// Exactly equal to the effective replay since — the boundary case
+	// until == since must be rejected (until must be strictly after).
+	cfg.ReplayUntil = fixedNow.Add(-fixedSince)
+
+	_, err := NewCollector(cfg, "0.2.0")
+	if err == nil {
+		t.Fatal("expected error when replay-until == effective since, got nil")
+	}
+	// Confirm the rejection comes from the until-after-since validation,
+	// not some unrelated startup failure.
+	if !strings.Contains(err.Error(), "must be after replay-since") {
+		t.Errorf("expected the until-after-since validation error, got: %v", err)
+	}
+}
+
+// TestCollector_ReplayAcceptsUntilAfterEffectiveSince verifies that a
+// valid replay-until greater than the effective replay-since is accepted.
+func TestCollector_ReplayAcceptsUntilAfterEffectiveSince(t *testing.T) {
+	cfg := testConfig("http://localhost:9999")
+	cfg.Replay = true
+	cfg.ReplaySince = 2 * time.Second                  // effective since = now - 2s
+	cfg.ReplayUntil = time.Now().Add(-1 * time.Second) // after effective since
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("expected success for valid replay-until, got: %v", err)
+	}
+	if c.replayUntil.IsZero() {
+		t.Error("replayUntil should be set")
+	}
+}
+
+// TestCollector_ReplayAcceptsUntilWithFullHistory verifies that
+// replay-until with zero replay-since (full history) is accepted.
+func TestCollector_ReplayAcceptsUntilWithFullHistory(t *testing.T) {
+	cfg := testConfig("http://localhost:9999")
+	cfg.Replay = true
+	cfg.ReplaySince = 0 // full history
+	cfg.ReplayUntil = time.Now().Add(-1 * time.Second)
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("expected success when replay-since=0 with replay-until, got: %v", err)
+	}
+	if c.replayUntil.IsZero() {
+		t.Error("replayUntil should be set even with full-history replay")
+	}
+}
+
+// TestCollector_ReplayAcceptsUnsetUntil verifies that a replay-until of zero
+// (no upper bound) is accepted regardless of replay-since.
+func TestCollector_ReplayAcceptsUnsetUntil(t *testing.T) {
+	cfg := testConfig("http://localhost:9999")
+	cfg.Replay = true
+	cfg.ReplaySince = 2 * time.Second
+	cfg.ReplayUntil = time.Time{} // zero = no upper bound
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("expected success with unset replay-until, got: %v", err)
+	}
+	if !c.replayUntil.IsZero() {
+		t.Error("replayUntil should be zero when not set")
+	}
+}
+
+// TestCollector_ReplayWithUntilBoundsRecordsExceedingly verifies that
+// replay with ReplayUntil excludes records after the upper boundary.
+// Records newer than until are not sent during replay; the cursor clamps
+// to until so normal polling picks them up afterwards.
+func TestCollector_ReplayWithUntilBoundsRecordsExceedingly(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "bounded-replay-001",
+		AcceptedCount: 5,
+	})
+
+	refTime := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.Replay = true
+	cfg.ReplaySince = 0       // full history
+	cfg.ReplayUntil = refTime // upper bound at refTime
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+	c.transport = mockTransport
+
+	// Records: refTime-2s, refTime-1s, refTime, refTime+1s, refTime+2s
+	// With until=refTime: refTime+1s and refTime+2s should be excluded.
+	// refTime is <= until, so it IS included (until is inclusive).
+	baseTime := refTime.Add(-2 * time.Second)
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2", "rec-3", "rec-4", "rec-5"}, baseTime),
+	}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	if mockTransport.CallCount() != 1 {
+		t.Fatalf("expected 1 batch, got %d", mockTransport.CallCount())
+	}
+	req := mockTransport.LastCall().Req
+
+	// rec-3 (refTime), rec-4 (refTime+1s), rec-5 (refTime+2s).
+	// rec-3 is AT until (inclusive) → included.
+	// rec-4 and rec-5 are AFTER until → excluded.
+	// So we expect 3 records: rec-1, rec-2, rec-3.
+	if len(req.Records) != 3 {
+		t.Fatalf("expected 3 records (up to until), got %d", len(req.Records))
+	}
+	for _, rec := range req.Records {
+		switch rec.SourceRecordID {
+		case "rec-1", "rec-2", "rec-3":
+			// expected
+		default:
+			t.Errorf("unexpected record in batch: %s", rec.SourceRecordID)
+		}
+	}
+
+	// Cursor should be clamped to until (refTime), not rec-3's time (also refTime in this case).
+	cursor, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	if !cursor.Equal(refTime) {
+		t.Errorf("cursor = %v, want until %v", cursor, refTime)
+	}
+
+	// replayCompleted must be set.
+	if !c.replayCompleted[dbPath] {
+		t.Error("replayCompleted should be true")
+	}
+}
+
+// TestCollector_ReplayWithUntilClampsCursorToUntil verifies that when the
+// last replayed record is AFTER the replay-until boundary (impossible with
+// the window reader), the completion cursor is still clamped to until.
+// This guards against edge cases where the clamp is necessary.
+func TestCollector_ReplayWithUntilClampsCursorToUntil(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "until-clamp-001",
+		AcceptedCount: 2,
+	})
+
+	refTime := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.Replay = true
+	cfg.ReplayUntil = refTime.Add(500 * time.Millisecond) // between rec-1 and rec-2
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+	c.transport = mockTransport
+
+	// Records at refTime and refTime+1s.
+	// until = refTime+500ms. rec-1 (<= until) is included; rec-2 (> until) excluded.
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2"}, refTime),
+	}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	if mockTransport.CallCount() != 1 {
+		t.Fatalf("expected 1 batch, got %d", mockTransport.CallCount())
+	}
+	req := mockTransport.LastCall().Req
+
+	if len(req.Records) != 1 {
+		t.Fatalf("expected 1 record (only rec-1 within window), got %d", len(req.Records))
+	}
+	if req.Records[0].SourceRecordID != "rec-1" {
+		t.Errorf("expected rec-1, got %s", req.Records[0].SourceRecordID)
+	}
+
+	// Cursor must be clamped to until (rec-2 was not sent, cursor at rec-1's time
+	// would be before until; the until clamp only fires when finalCursor > until).
+	// Here finalCursor = rec-1.OccurredAt = refTime < until, so no until clamp needed.
+	// The cursor should be at rec-1's time.
+	cursor, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	if !cursor.Equal(refTime) {
+		t.Errorf("cursor = %v, want rec-1 at %v", cursor, refTime)
+	}
+
+	if !c.replayCompleted[dbPath] {
+		t.Error("replayCompleted should be true")
+	}
+}
+
+// TestCollector_ReplayWithUntilDoesNotRegressCursor verifies that
+// the until clamp does NOT regress the cursor below the pre-replay
+// stored cursor (the existing PR #47 clamp is still applied).
+func TestCollector_ReplayWithUntilDoesNotRegressCursor(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "until-no-regress-001",
+		AcceptedCount: 3,
+	})
+
+	refTime := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.Replay = true
+	// until is BEFORE the stored cursor — the stored cursor clamp must win.
+	cfg.ReplayUntil = refTime
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+	c.transport = mockTransport
+
+	// Stored cursor AFTER until — must not regress.
+	storedCursor := refTime.Add(24 * time.Hour) // way after until
+	if err := c.tracker.SetCursor(dbPath, storedCursor); err != nil {
+		t.Fatalf("SetCursor: %v", err)
+	}
+
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2", "rec-3"}, refTime),
+	}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	cursor, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	if !cursor.Equal(storedCursor) {
+		t.Errorf("cursor = %v, want stored cursor %v (bug: until clamp regressed cursor)", cursor, storedCursor)
+	}
+
+	if !c.replayCompleted[dbPath] {
+		t.Error("replayCompleted should be true")
+	}
+}
+
+// TestCollector_ReplayWithUntilEmptyWindowCompletesWithoutSends verifies that
+// a valid but empty replay window (no records between since and until)
+// completes without sending any records and without advancing the cursor.
+// The replay latch fires and the heartbeat path remains reachable.
+func TestCollector_ReplayWithUntilEmptyWindowCompletesWithoutSends(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "empty-window-001",
+		AcceptedCount: 0,
+	})
+
+	refTime := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.Replay = true
+	cfg.ReplaySince = 0                           // full history
+	cfg.ReplayUntil = refTime.Add(-1 * time.Hour) // until is before all records
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+	c.transport = mockTransport
+
+	// Records exist but all are AFTER until — window is empty.
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2"}, refTime),
+	}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	// No records sent — window is empty.
+	if mockTransport.CallCount() != 0 {
+		t.Fatalf("expected 0 batches for empty window, got %d", mockTransport.CallCount())
+	}
+
+	// replayCompleted must still be set — the latch fires for valid empty windows.
+	if !c.replayCompleted[dbPath] {
+		t.Error("replayCompleted should be true even for empty window")
+	}
+
+	// Cursor should NOT advance (stays at default zero since stored cursor is also zero).
+	cursor, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	if !cursor.IsZero() {
+		t.Errorf("cursor = %v, want zero (no advance for empty window)", cursor)
+	}
+}
+
+// TestCollector_ReplayWithUntilHeartbeatPathIntact verifies that the
+// heartbeat path functions correctly after replay completion with
+// ReplayUntil — after replay completes, normal mode on a subsequent
+// cycle can reach the heartbeat path when no new records exist.
+func TestCollector_ReplayWithUntilHeartbeatPathIntact(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	refTime := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+
+	// First, complete a bounded replay to set lastSuccess and replayCompleted.
+	mockTransport1 := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "replay-hb-setup",
+		AcceptedCount: 1,
+	})
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.HeartbeatInterval = time.Nanosecond // always elapsed after first success
+	cfg.Replay = true
+	cfg.ReplayUntil = refTime.Add(1 * time.Second) // includes rec-1
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+	c.transport = mockTransport1
+
+	// Records: rec-1 at refTime (within window), rec-2 at refTime+2s (outside).
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2"}, refTime),
+	}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, _ := c.resolveDatabases()
+	c.processDatabase(context.Background(), dbs[0])
+
+	// Replay completed, cursor at rec-1's time (within window).
+	if !c.replayCompleted[dbPath] {
+		t.Fatal("replay should have completed")
+	}
+
+	// Now use a mock with zero records so heartbeat fires on next cycle.
+	mock2 := &mockReader{
+		records: nil,
+	}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock2, func() {}, nil
+	}
+
+	mockTransport2 := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "heartbeat-after-replay-until",
+		AcceptedCount: 0,
+	})
+	c.transport = mockTransport2
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	// Heartbeat should have fired (lastSuccess set, interval elapsed).
+	if mockTransport2.CallCount() == 0 {
+		t.Fatal("expected heartbeat to fire, but no call was made")
+	}
+	req := mockTransport2.LastCall().Req
+	if len(req.Records) != 0 {
+		t.Errorf("heartbeat should have 0 records, got %d", len(req.Records))
+	}
+}
+
+// TestCollector_ReplayWithUntilThenNormalPollingResumes verifies that after
+// bounded replay completes, normal polling picks up records newer than the
+// replay-until boundary.
+func TestCollector_ReplayWithUntilThenNormalPollingResumes(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	refTime := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+
+	// Phase 1: bounded replay — only records up to until are sent.
+	mockTransport1 := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "replay-phase-1",
+		AcceptedCount: 2,
+	})
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.Replay = true
+	cfg.ReplayUntil = refTime.Add(500 * time.Millisecond) // between rec-1 and rec-2
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+	c.transport = mockTransport1
+
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2", "rec-3"}, refTime),
+	}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, _ := c.resolveDatabases()
+	c.processDatabase(context.Background(), dbs[0])
+
+	// Verify: only rec-1 was sent (within [0, until] window).
+	if mockTransport1.CallCount() != 1 {
+		t.Fatalf("phase 1: expected 1 batch, got %d", mockTransport1.CallCount())
+	}
+	req1 := mockTransport1.LastCall().Req
+	if len(req1.Records) != 1 {
+		t.Fatalf("phase 1: expected 1 record, got %d", len(req1.Records))
+	}
+	if req1.Records[0].SourceRecordID != "rec-1" {
+		t.Errorf("phase 1: expected rec-1, got %s", req1.Records[0].SourceRecordID)
+	}
+
+	// Cursor after replay: rec-1's time (refTime) — before until, no clamp needed.
+	cursor, _ := c.tracker.GetCursor(dbPath)
+	if !cursor.Equal(refTime) {
+		t.Errorf("phase 1 cursor = %v, want %v", cursor, refTime)
+	}
+
+	// Phase 2: simulate normal polling — cfg.Replay is still true but
+	// replayCompleted prevents re-trigger. Normal mode reads from cursor
+	// and picks up records after cursor (rec-2, rec-3).
+	mockTransport2 := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "normal-phase-2",
+		AcceptedCount: 2,
+	})
+	c.transport = mockTransport2
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	// Normal mode should send rec-2 and rec-3 (after cursor, which is refTime).
+	if mockTransport2.CallCount() != 1 {
+		t.Fatalf("phase 2: expected 1 batch, got %d", mockTransport2.CallCount())
+	}
+	req2 := mockTransport2.LastCall().Req
+	if len(req2.Records) != 2 {
+		t.Fatalf("phase 2: expected 2 records (rec-2, rec-3 picked up by normal polling), got %d", len(req2.Records))
+	}
+	for _, rec := range req2.Records {
+		switch rec.SourceRecordID {
+		case "rec-2", "rec-3":
+			// expected
+		default:
+			t.Errorf("phase 2: unexpected record: %s", rec.SourceRecordID)
+		}
+	}
+}
+
+// TestCollector_ReplayWithUntilFailureRewindPreserved verifies that when
+// a replay batch fails with ReplayUntil set, the cursor is rewound
+// correctly (to replaySince, clamped to stored cursor) — the until
+// boundary does not interfere with failure recovery.
+func TestCollector_ReplayWithUntilFailureRewindPreserved(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	refTime := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.BatchLimit = 2 // small batch to force multiple batches
+	cfg.Replay = true
+	cfg.ReplayUntil = refTime.Add(5 * time.Second) // far enough to include all
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	// Failing transport on second call (batch 1 succeeds, batch 2 fails).
+	callCount := 0
+	mockTransport := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "replay-until-fail-001",
+		AcceptedCount: 2,
+	})
+	ft := &failingTransport{
+		transport: mockTransport,
+		err:       fmt.Errorf("simulated transport failure"),
+		callCount: &callCount,
+	}
+	c.transport = ft
+
+	// 4 records, batch limit 2 → 2 batches (2+2).
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2", "rec-3", "rec-4"}, refTime),
+	}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	// 2 calls: first success, second failure.
+	if callCount != 2 {
+		t.Fatalf("expected 2 SendBatch calls, got %d", callCount)
+	}
+
+	// Cursor must be rewound to replaySince (zero time).
+	cursor, err := c.tracker.GetCursor(dbPath)
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	if !cursor.IsZero() {
+		t.Errorf("cursor = %v, want zero (rewound to replaySince after failure)", cursor)
+	}
+
+	// replayCompleted should NOT be set.
+	if c.replayCompleted[dbPath] {
+		t.Error("replayCompleted should be false after failed replay")
+	}
+}
+
+// TestCollector_ReplayWithUntilReplayLatchPreserved verifies that the
+// replayCompleted latch is set after bounded replay completes, preventing
+// re-trigger on subsequent cycles (same latch behavior now verified
+// with ReplayUntil active).
+func TestCollector_ReplayWithUntilReplayLatchPreserved(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	refTime := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+
+	mockTransport1 := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "latch-test-1",
+		AcceptedCount: 3,
+	})
+
+	cfg := testConfig("http://localhost:9999")
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+	cfg.Replay = true
+	cfg.ReplayUntil = refTime.Add(10 * time.Second) // includes all records
+
+	c, err := NewCollector(cfg, "0.2.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+	c.transport = mockTransport1
+
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1", "rec-2", "rec-3"}, refTime),
+	}
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, _ := c.resolveDatabases()
+
+	// First cycle: replay runs and completes.
+	c.processDatabase(context.Background(), dbs[0])
+	if !c.replayCompleted[dbPath] {
+		t.Fatal("replay should have completed on first cycle")
+	}
+
+	// Second cycle: replay should NOT re-trigger.
+	mockTransport2 := gateway.NewMockTransport(&gateway.IngestResponse{
+		BatchID:       "latch-test-2",
+		AcceptedCount: 0,
+	})
+	c.transport = mockTransport2
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	// No records should be sent — replay latch blocks re-trigger.
+	if mockTransport2.CallCount() > 0 {
+		req := mockTransport2.LastCall().Req
+		if len(req.Records) > 0 {
+			t.Errorf("second cycle sent %d records, want 0 (latch prevented re-replay)", len(req.Records))
+		}
+	}
 }

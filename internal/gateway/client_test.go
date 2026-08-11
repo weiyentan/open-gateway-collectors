@@ -35,10 +35,10 @@ func TestSendBatch_Success(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(IngestResponse{
-			BatchID:        "batch-123",
-			AcceptedCount:  1,
-			RejectedCount:  0,
-			Results:        []BatchResult{{Index: 0, Status: "accepted"}},
+			BatchID:       "batch-123",
+			AcceptedCount: 1,
+			RejectedCount: 0,
+			Results:       []BatchResult{{Index: 0, Status: "accepted"}},
 		})
 	}))
 	defer server.Close()
@@ -71,9 +71,9 @@ func TestSendBatch_PartialSuccess(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(IngestResponse{
-			BatchID:        "batch-456",
-			AcceptedCount:  2,
-			RejectedCount:  1,
+			BatchID:       "batch-456",
+			AcceptedCount: 2,
+			RejectedCount: 1,
 			Results: []BatchResult{
 				{Index: 0, Status: "accepted"},
 				{Index: 1, Status: "accepted"},
@@ -902,4 +902,3 @@ func TestIngestRequest_JSONSerialization_EmptyProjections(t *testing.T) {
 		t.Errorf("SessionContexts should be nil when absent from JSON")
 	}
 }
-

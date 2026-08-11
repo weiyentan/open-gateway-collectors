@@ -86,17 +86,22 @@ type Config struct {
 	// (replay all records regardless of timestamp). Only used when
 	// Replay is true.
 	ReplaySince time.Duration `env:"GATEWAY_COLLECTOR_REPLAY_SINCE"`
+
+	// ReplayUntil bounds the replay window to records not newer than this
+	// timestamp. A zero value means no upper bound. Only used when
+	// Replay is true.
+	ReplayUntil time.Time `env:"GATEWAY_COLLECTOR_REPLAY_UNTIL"`
 }
 
 // Load reads configuration from environment variables with defaults.
 // It returns an error if required fields are missing or invalid.
 func Load() (*Config, error) {
 	cfg := &Config{
-		Token:             os.Getenv("GATEWAY_COLLECTOR_TOKEN"),
-		BaseURL:           os.Getenv("GATEWAY_BASE_URL"),
-		PollInterval:      getDurationEnv("GATEWAY_COLLECTOR_POLL_INTERVAL", 60*time.Second),
-		HeartbeatInterval: getDurationEnv("GATEWAY_COLLECTOR_HEARTBEAT_INTERVAL", 120*time.Second),
-		BatchLimit:        getIntEnv("GATEWAY_COLLECTOR_BATCH_LIMIT", defaultBatchLimit),
+		Token:                  os.Getenv("GATEWAY_COLLECTOR_TOKEN"),
+		BaseURL:                os.Getenv("GATEWAY_BASE_URL"),
+		PollInterval:           getDurationEnv("GATEWAY_COLLECTOR_POLL_INTERVAL", 60*time.Second),
+		HeartbeatInterval:      getDurationEnv("GATEWAY_COLLECTOR_HEARTBEAT_INTERVAL", 120*time.Second),
+		BatchLimit:             getIntEnv("GATEWAY_COLLECTOR_BATCH_LIMIT", defaultBatchLimit),
 		SQLitePath:             os.Getenv("GATEWAY_COLLECTOR_SQLITE_PATH"),
 		SQLiteDir:              getEnvWithDefault("GATEWAY_COLLECTOR_SQLITE_DIR", defaultSQLiteDir()),
 		LogLevel:               getEnvWithDefault("GATEWAY_COLLECTOR_LOG_LEVEL", "info"),
@@ -108,6 +113,17 @@ func Load() (*Config, error) {
 		KafkaClientID:          os.Getenv("GATEWAY_KAFKA_CLIENT_ID"),
 		Replay:                 truthy[strings.ToLower(os.Getenv("GATEWAY_COLLECTOR_REPLAY"))],
 		ReplaySince:            getDurationEnv("GATEWAY_COLLECTOR_REPLAY_SINCE", 0),
+	}
+
+	// ReplayUntil is parsed with strict RFC3339 validation — an invalid
+	// value fails startup with the source named, unlike the lenient
+	// duration helpers above.
+	if v := os.Getenv("GATEWAY_COLLECTOR_REPLAY_UNTIL"); v != "" {
+		replayUntil, err := ParseReplayUntil(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid value for GATEWAY_COLLECTOR_REPLAY_UNTIL: %w", err)
+		}
+		cfg.ReplayUntil = replayUntil
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -187,6 +203,23 @@ func defaultCursorDir() string {
 		return "."
 	}
 	return dir
+}
+
+// ParseReplayUntil parses a strict RFC3339 timestamp used to bound the
+// replay window. It accepts RFC3339 (e.g. "2026-01-02T15:04:05Z") and
+// RFC3339 with fractional seconds (e.g. "2026-01-02T15:04:05.123Z").
+// Any other input — including the empty string — is rejected, so
+// callers can distinguish "unset" (no upper bound) from a malformed
+// value. The returned error does not name the source; callers wrap it
+// with the env var or flag name.
+func ParseReplayUntil(value string) (time.Time, error) {
+	for _, layout := range []string{time.RFC3339, time.RFC3339Nano} {
+		t, err := time.Parse(layout, value)
+		if err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("must be a strict RFC3339 timestamp (e.g. %q), got %q", "2026-01-02T15:04:05Z", value)
 }
 
 // getDurationEnv reads a duration environment variable or returns the default.

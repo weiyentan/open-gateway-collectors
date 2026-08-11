@@ -400,4 +400,3 @@ func TestOpenAndInspect_DetectsSessionColumns(t *testing.T) {
 		}
 	}
 }
-
