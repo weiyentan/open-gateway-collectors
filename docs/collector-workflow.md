@@ -118,6 +118,14 @@ Each push cycle (one `iterate()` call) runs every **Poll Interval** (default: 60
 
 12. **Heartbeat Send** — If both conditions are met, the collector POSTs an empty Ingest Batch (zero records) to the Gateway. This updates the Source Database's `last_seen_at` timestamp on the Gateway, confirming the collector and database are alive, without inserting any usage rows.
 
+## Operational Notes
+
+### Replay after client-side filtering fixes
+
+Client-side filters — such as omitting blank or whitespace-only **Project Directory Snapshot** paths so the Gateway no longer rejects an entire batch with HTTP 422 — apply only to batches sent **after** the fixed collector version is deployed. Batches that were already rejected (HTTP 422) and moved to the dead-letter queue (DLQ) by the Gateway consumer were never stored, and the collector's Cursor has already advanced past them, so they will not be re-sent by normal incremental reads.
+
+To backfill those records after deployment, run a collector **Replay** (see ADR-0008): start with `-replay` or `GATEWAY_COLLECTOR_REPLAY=true`, optionally bounded with `GATEWAY_COLLECTOR_REPLAY_SINCE` / `GATEWAY_COLLECTOR_REPLAY_UNTIL`. Replay re-reads Source Database history past the Cursor and re-sends records and projections through the normal ingest pipeline; the Gateway's idempotent upserts make re-sending safe.
+
 ## ADR References
 
 The collector's design is grounded in five architectural decisions. Each ADR contributes to the workflow as described below.
