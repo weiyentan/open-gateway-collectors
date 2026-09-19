@@ -69,6 +69,11 @@ type SessionContext struct {
 	ParentSessionID   string `json:"parent_session_id,omitempty"`
 	WorkspaceID       string `json:"workspace_id,omitempty"`
 	Model             string `json:"model,omitempty"`
+
+	// SourceCreatedAt is the session creation time from the source database
+	// in Unix milliseconds. Optional — omitted when the source database does
+	// not expose a usable value.
+	SourceCreatedAt *int64 `json:"source_created_at,omitempty"`
 }
 
 // ProjectSnapshot is a batch-level snapshot of OpenCode project metadata
@@ -138,6 +143,7 @@ func MapToSessionContext(data sqlite.SessionContextData) SessionContext {
 		ParentSessionID:   data.ParentSessionID,
 		WorkspaceID:       data.WorkspaceID,
 		Model:             data.Model,
+		SourceCreatedAt:   data.SourceCreatedAt,
 	}
 }
 

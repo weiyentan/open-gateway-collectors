@@ -828,6 +828,155 @@ func TestReadSessionContexts_UnknownID(t *testing.T) {
 	}
 }
 
+func TestReadSessionContexts_SourceCreatedAtPresent(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", agent: "claude", model: "gpt-4o"},
+	}
+
+	dbPath := createTestDB(t, sessions, nil)
+	r := openReaderWithSchema(t, dbPath)
+	defer r.Close()
+
+	ctxs, err := r.ReadSessionContexts([]string{"sess-a"})
+	if err != nil {
+		t.Fatalf("ReadSessionContexts failed: %v", err)
+	}
+	if len(ctxs) != 1 {
+		t.Fatalf("expected 1 session context, got %d", len(ctxs))
+	}
+	if ctxs[0].SourceCreatedAt == nil {
+		t.Fatal("SourceCreatedAt should be set when session.time_created is present")
+	}
+	if *ctxs[0].SourceCreatedAt != sessTimeA {
+		t.Errorf("SourceCreatedAt = %d, want %d", *ctxs[0].SourceCreatedAt, sessTimeA)
+	}
+}
+
+func TestReadSessionContexts_SourceCreatedAtUnsupportedSchema(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", agent: "claude", model: ""},
+	}
+
+	dbPath := createTestDB(t, sessions, nil)
+	r := openReaderWithSchema(t, dbPath)
+	defer r.Close()
+
+	// Simulate an older source database whose schema does not advertise
+	// time_created. The read must degrade gracefully rather than fail.
+	r.WithSchemaInfo(&DatabaseInfo{SessionColumns: []string{"id", "agent"}})
+
+	ctxs, err := r.ReadSessionContexts([]string{"sess-a"})
+	if err != nil {
+		t.Fatalf("ReadSessionContexts failed: %v", err)
+	}
+	if len(ctxs) != 1 {
+		t.Fatalf("expected 1 session context, got %d", len(ctxs))
+	}
+	if ctxs[0].SourceCreatedAt != nil {
+		t.Errorf("SourceCreatedAt should be nil for unsupported schema, got %d", *ctxs[0].SourceCreatedAt)
+	}
+}
+
+func TestReadSessionContexts_SourceCreatedAtNilSchemaInfo(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", agent: "claude", model: ""},
+	}
+
+	dbPath := createTestDB(t, sessions, nil)
+	r, err := NewOpenCodeReader(dbPath)
+	if err != nil {
+		t.Fatalf("NewOpenCodeReader failed: %v", err)
+	}
+	defer r.Close()
+
+	// No schema info attached: time_created availability is unknown, so the
+	// field stays nil and the collector remains backward compatible.
+	ctxs, err := r.ReadSessionContexts([]string{"sess-a"})
+	if err != nil {
+		t.Fatalf("ReadSessionContexts failed: %v", err)
+	}
+	if len(ctxs) != 1 {
+		t.Fatalf("expected 1 session context, got %d", len(ctxs))
+	}
+	if ctxs[0].SourceCreatedAt != nil {
+		t.Errorf("SourceCreatedAt should be nil without schema info, got %d", *ctxs[0].SourceCreatedAt)
+	}
+}
+
+func TestReadSessionContexts_SourceCreatedAtNullAndZero(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-null", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", agent: "claude", model: ""},
+		{id: "sess-zero", timeCreated: 0, timeUpdated: sessTimeA,
+			projectID: "proj-1", agent: "claude", model: ""},
+	}
+
+	dbPath := createTestDB(t, sessions, nil)
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("failed to reopen test db: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE session SET time_created = NULL WHERE id = 'sess-null'`); err != nil {
+		db.Close()
+		t.Fatalf("failed to null time_created: %v", err)
+	}
+	db.Close()
+
+	r := openReaderWithSchema(t, dbPath)
+	defer r.Close()
+
+	ctxs, err := r.ReadSessionContexts([]string{"sess-null", "sess-zero"})
+	if err != nil {
+		t.Fatalf("ReadSessionContexts failed: %v", err)
+	}
+	if len(ctxs) != 2 {
+		t.Fatalf("expected 2 session contexts, got %d", len(ctxs))
+	}
+	for _, ctx := range ctxs {
+		if ctx.SourceCreatedAt != nil {
+			t.Errorf("session %q: SourceCreatedAt should be nil for null/zero, got %d",
+				ctx.ExternalSessionID, *ctx.SourceCreatedAt)
+		}
+	}
+}
+
+func TestReadSessionContexts_SourceCreatedAtMalformed(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-bad", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", agent: "claude", model: ""},
+	}
+
+	dbPath := createTestDB(t, sessions, nil)
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("failed to reopen test db: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE session SET time_created = 'not-a-timestamp' WHERE id = 'sess-bad'`); err != nil {
+		db.Close()
+		t.Fatalf("failed to corrupt time_created: %v", err)
+	}
+	db.Close()
+
+	r := openReaderWithSchema(t, dbPath)
+	defer r.Close()
+
+	ctxs, err := r.ReadSessionContexts([]string{"sess-bad"})
+	if err != nil {
+		t.Fatalf("malformed time_created should not fail the read: %v", err)
+	}
+	if len(ctxs) != 1 {
+		t.Fatalf("expected 1 session context, got %d", len(ctxs))
+	}
+	if ctxs[0].SourceCreatedAt != nil {
+		t.Errorf("SourceCreatedAt should be nil for malformed value, got %d", *ctxs[0].SourceCreatedAt)
+	}
+}
+
 func TestReadProjectData_ReadsExisting(t *testing.T) {
 	sessions := []sessionRow{
 		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
