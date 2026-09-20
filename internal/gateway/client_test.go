@@ -709,6 +709,68 @@ func TestMapToSessionContext_EmptyFields(t *testing.T) {
 	}
 }
 
+func TestMapToSessionContext_SourceCreatedAt(t *testing.T) {
+	created := int64(1_700_000_000_000)
+	data := sqlite.SessionContextData{
+		ExternalSessionID: "sess-created",
+		SourceCreatedAt:   &created,
+	}
+	result := MapToSessionContext(data)
+
+	if result.SourceCreatedAt == nil {
+		t.Fatal("SourceCreatedAt should not be nil when source value is available")
+	}
+	if *result.SourceCreatedAt != created {
+		t.Errorf("SourceCreatedAt = %d, want %d", *result.SourceCreatedAt, created)
+	}
+
+	// Absent source value maps to nil so the wire field is omitted.
+	empty := MapToSessionContext(sqlite.SessionContextData{ExternalSessionID: "sess-none"})
+	if empty.SourceCreatedAt != nil {
+		t.Errorf("SourceCreatedAt should be nil when absent, got %d", *empty.SourceCreatedAt)
+	}
+}
+
+func TestSessionContext_JSONSerialization_SourceCreatedAt(t *testing.T) {
+	created := int64(1_700_000_000_000)
+	ctx := SessionContext{
+		ExternalSessionID: "sess-1",
+		SourceCreatedAt:   &created,
+	}
+
+	body, err := json.Marshal(ctx)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+
+	// Verify the exact Gateway wire field name and value.
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	got, ok := raw["source_created_at"]
+	if !ok {
+		t.Fatalf("expected exact field %q in %s", "source_created_at", body)
+	}
+	if got.(float64) != float64(created) {
+		t.Errorf("source_created_at = %v, want %d", got, created)
+	}
+
+	// Omitted when the source value is unavailable.
+	emptyBody, err := json.Marshal(SessionContext{ExternalSessionID: "sess-2"})
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	if strings.Contains(string(emptyBody), "source_created_at") {
+		t.Errorf("source_created_at should be omitted when unavailable: %s", emptyBody)
+	}
+
+	// No invented completion timestamp is ever emitted.
+	if strings.Contains(string(body), "source_completed_at") {
+		t.Errorf("source_completed_at must not be emitted: %s", body)
+	}
+}
+
 func TestMapToProjectSnapshot_AllFields(t *testing.T) {
 	data := sqlite.ProjectData{
 		ExternalProjectID: "proj-1",

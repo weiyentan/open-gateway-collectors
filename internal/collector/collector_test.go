@@ -1261,6 +1261,64 @@ func TestCollector_IncludesProjectionsInRequest(t *testing.T) {
 	}
 }
 
+func TestCollector_ForwardsSessionSourceCreatedAt(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := createTestDB(t, dir, "test")
+
+	srv, lastReq := gatewayServer(http.StatusCreated, gateway.IngestResponse{
+		BatchID:       "batch-created-001",
+		AcceptedCount: 1,
+	})
+
+	cfg := testConfig(srv.URL)
+	cfg.SQLitePath = dbPath
+	cfg.CursorDir = dir
+
+	c, err := NewCollector(cfg, "0.1.0")
+	if err != nil {
+		t.Fatalf("NewCollector: %v", err)
+	}
+
+	now := time.Date(2025, 7, 18, 12, 0, 0, 0, time.UTC)
+	created := int64(1_700_000_000_000)
+	mock := &mockReader{
+		records: makeRecords([]string{"rec-1"}, now),
+		sessionCtxs: []sqlite.SessionContextData{
+			{ExternalSessionID: "sess-rec-1", Agent: "claude", ProjectID: "proj-1",
+				SourceCreatedAt: &created},
+		},
+	}
+
+	c.newReader = func(_ string, _ *sqlite.DatabaseInfo) (sqlite.Reader, func(), error) {
+		return mock, func() {}, nil
+	}
+
+	dbs, err := c.resolveDatabases()
+	if err != nil {
+		t.Fatalf("resolveDatabases: %v", err)
+	}
+	if len(dbs) != 1 {
+		t.Fatalf("expected 1 DB, got %d", len(dbs))
+	}
+
+	c.processDatabase(context.Background(), dbs[0])
+
+	req, ok := lastReq.Load().(gateway.IngestRequest)
+	if !ok {
+		t.Fatal("no request received by gateway")
+	}
+	if len(req.SessionContexts) != 1 {
+		t.Fatalf("expected 1 session context, got %d", len(req.SessionContexts))
+	}
+	got := req.SessionContexts[0].SourceCreatedAt
+	if got == nil {
+		t.Fatal("forwarded SessionContext.SourceCreatedAt should not be nil")
+	}
+	if *got != created {
+		t.Errorf("forwarded SourceCreatedAt = %d, want %d", *got, created)
+	}
+}
+
 func TestCollector_DedupSessionContextsWithinBatch(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := createTestDB(t, dir, "test")

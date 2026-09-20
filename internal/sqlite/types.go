@@ -91,6 +91,11 @@ type SessionContextData struct {
 	ParentSessionID   string // session.parent_id
 	WorkspaceID       string // session.workspace_id
 	Model             string // session.model
+
+	// SourceCreatedAt is the session.time_created value (Unix ms), or nil
+	// when the source database does not expose a usable value. Optional so
+	// older source databases and schemas degrade gracefully.
+	SourceCreatedAt *int64
 }
 
 // ProjectData holds snapshot data from an OpenCode project row. Fields

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -323,19 +324,22 @@ func (r *OpenCodeReader) ReadSessionContexts(sessionIDs []string) ([]SessionCont
 
 	// Determine which columns exist in the session table.
 	hasTitle := false
+	hasTimeCreated := false
 	if r.dbInfo != nil {
-		for _, col := range r.dbInfo.SessionColumns {
-			if col == "title" {
-				hasTitle = true
-				break
-			}
-		}
+		hasTitle = slices.Contains(r.dbInfo.SessionColumns, "title")
+		hasTimeCreated = slices.Contains(r.dbInfo.SessionColumns, "time_created")
 	}
 
 	// Build query dynamically based on available columns.
 	titleCol := "'' as title"
 	if hasTitle {
 		titleCol = "s.title"
+	}
+	// Older source databases may not expose time_created; select a NULL
+	// constant so the projection reads without error and the field stays nil.
+	sourceCreatedCol := "NULL as time_created"
+	if hasTimeCreated {
+		sourceCreatedCol = "s.time_created"
 	}
 
 	// Build parameterized IN clause.
@@ -347,9 +351,9 @@ func (r *OpenCodeReader) ReadSessionContexts(sessionIDs []string) ([]SessionCont
 	}
 
 	query := fmt.Sprintf(`
-		SELECT s.id, %s, s.agent, s.project_id, s.parent_id, s.workspace_id, s.model
+		SELECT s.id, %s, s.agent, s.project_id, s.parent_id, s.workspace_id, s.model, %s
 		FROM session s
-		WHERE s.id IN (%s)`, titleCol, strings.Join(placeholders, ","))
+		WHERE s.id IN (%s)`, titleCol, sourceCreatedCol, strings.Join(placeholders, ","))
 
 	rows, err := r.db.Query(query, args...)
 	if err != nil {
@@ -361,8 +365,9 @@ func (r *OpenCodeReader) ReadSessionContexts(sessionIDs []string) ([]SessionCont
 	for rows.Next() {
 		var (
 			id, title, agent, projectID, parentID, workspaceID, model sql.NullString
+			sourceCreated                                             any
 		)
-		if err := rows.Scan(&id, &title, &agent, &projectID, &parentID, &workspaceID, &model); err != nil {
+		if err := rows.Scan(&id, &title, &agent, &projectID, &parentID, &workspaceID, &model, &sourceCreated); err != nil {
 			return nil, fmt.Errorf("scanning session context: %w", err)
 		}
 		result = append(result, SessionContextData{
@@ -373,6 +378,7 @@ func (r *OpenCodeReader) ReadSessionContexts(sessionIDs []string) ([]SessionCont
 			ParentSessionID:   parentID.String,
 			WorkspaceID:       workspaceID.String,
 			Model:             model.String,
+			SourceCreatedAt:   optionalUnixMillis(sourceCreated),
 		})
 	}
 
@@ -560,6 +566,51 @@ func (r *OpenCodeReader) ReadTodoData(sessionIDs []string) ([]TodoData, error) {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+// optionalUnixMillis converts a scanned session.time_created value into an
+// optional Unix-millisecond pointer. A nil (NULL/absent), non-positive, or
+// malformed value yields nil so the field is omitted from the wire payload
+// rather than failing the read.
+func optionalUnixMillis(v any) *int64 {
+	switch t := v.(type) {
+	case nil:
+		return nil
+	case int64:
+		if t <= 0 {
+			return nil
+		}
+		return &t
+	case float64:
+		if t <= 0 {
+			return nil
+		}
+		ms := int64(t)
+		if ms <= 0 {
+			return nil
+		}
+		return &ms
+	case []byte:
+		return parseUnixMillis(string(t))
+	case string:
+		return parseUnixMillis(t)
+	default:
+		return nil
+	}
+}
+
+// parseUnixMillis parses a decimal Unix-millisecond string, returning nil for
+// empty, non-numeric, or non-positive values.
+func parseUnixMillis(s string) *int64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	ms, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || ms <= 0 {
+		return nil
+	}
+	return &ms
+}
 
 // messageData maps the relevant fields from an OpenCode message.data JSON blob.
 type messageData struct {
