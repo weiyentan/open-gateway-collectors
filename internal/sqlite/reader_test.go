@@ -1044,6 +1044,66 @@ func TestReadProjectDirectoryData_TableNotExist(t *testing.T) {
 	}
 }
 
+func TestReadProjectDirectoryData_NullAndBlankPaths(t *testing.T) {
+	sessions := []sessionRow{
+		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,
+			projectID: "proj-1", agent: "claude", model: ""},
+	}
+	projects := []projectRow{
+		{id: "proj-1", title: "Test Project", worktree: "/tmp/test"},
+	}
+	projectDirs := []projectDirRow{
+		{projectID: "proj-1", path: ""},
+		{projectID: "proj-1", path: "   "},
+		{projectID: "proj-1", path: "/tmp/test/src"},
+	}
+
+	dbPath := createTestDBWithProjections(t, sessions, nil, projects, projectDirs, nil)
+
+	// Insert a row with a NULL path, mirroring OpenCode databases where
+	// project_directory.path is NULL for some rows.
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("failed to reopen test db: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO project_directory (project_id, path) VALUES (?, NULL)`, "proj-1"); err != nil {
+		db.Close()
+		t.Fatalf("failed to insert NULL path row: %v", err)
+	}
+	db.Close()
+
+	r := openReaderWithSchema(t, dbPath)
+	defer r.Close()
+
+	data, err := r.ReadProjectDirectoryData([]string{"proj-1"})
+	if err != nil {
+		t.Fatalf("ReadProjectDirectoryData failed: %v", err)
+	}
+	if len(data) != 4 {
+		t.Fatalf("expected 4 project directory entries, got %d", len(data))
+	}
+
+	// NULL and empty rows both surface as empty strings; whitespace-only and
+	// non-empty values are preserved verbatim. The collector filters these
+	// before building the ingest request.
+	pathCounts := make(map[string]int)
+	for _, d := range data {
+		if d.ExternalProjectID != "proj-1" {
+			t.Errorf("ExternalProjectID = %q, want %q", d.ExternalProjectID, "proj-1")
+		}
+		pathCounts[d.Path]++
+	}
+	if pathCounts[""] != 2 {
+		t.Errorf("expected 2 entries with empty path (NULL + empty), got %d", pathCounts[""])
+	}
+	if pathCounts["   "] != 1 {
+		t.Errorf("expected 1 entry with whitespace path, got %d", pathCounts["   "])
+	}
+	if pathCounts["/tmp/test/src"] != 1 {
+		t.Errorf("expected 1 entry with /tmp/test/src, got %d", pathCounts["/tmp/test/src"])
+	}
+}
+
 func TestReadTodoData_ReadsExisting(t *testing.T) {
 	sessions := []sessionRow{
 		{id: "sess-a", timeCreated: sessTimeA, timeUpdated: sessTimeA,

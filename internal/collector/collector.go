@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -818,11 +819,19 @@ func dedupProjectSnapshots(data []sqlite.ProjectData) []gateway.ProjectSnapshot 
 }
 
 // dedupProjectDirectorySnapshots de-duplicates ProjectDirectoryData by
-// ExternalProjectID within a batch and maps to wire types.
+// ExternalProjectID and Path within a batch and maps to wire types.
+// Blank or whitespace-only Path values are omitted: a NULL or missing
+// project_directory.path in SQLite surfaces as an empty string, and the
+// Gateway rejects empty directory values with HTTP 422, failing the whole
+// ingest batch. Filtering here keeps the read-only snapshot clean without
+// touching the Source Database.
 func dedupProjectDirectorySnapshots(data []sqlite.ProjectDirectoryData) []gateway.ProjectDirectorySnapshot {
 	seen := make(map[string]bool)
 	var result []gateway.ProjectDirectorySnapshot
 	for _, d := range data {
+		if strings.TrimSpace(d.Path) == "" {
+			continue
+		}
 		key := d.ExternalProjectID + "\x00" + d.Path
 		if d.ExternalProjectID != "" && !seen[key] {
 			seen[key] = true
